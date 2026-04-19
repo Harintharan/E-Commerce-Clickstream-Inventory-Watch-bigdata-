@@ -1,0 +1,23 @@
+FROM apache/airflow:2.7.2-python3.11
+
+USER root
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    postgresql-client \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /airflow \
+    && chown -R airflow:0 /airflow
+
+USER airflow
+
+# Copy requirements
+COPY requirements.txt /requirements.txt
+
+# Install Python packages
+RUN pip install --no-cache-dir -r /requirements.txt
+
+# Copy DAGs
+COPY dags /airflow/dags
+
+WORKDIR /airflow

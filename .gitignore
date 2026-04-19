@@ -1,0 +1,85 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Logs and databases
+*.log
+logs/
+producer_logs/
+processor_logs/
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Docker
+.dockerignore
+
+# Environment variables
+.env.local
+.env.*.local
+
+# PostgreSQL data
+postgres_data/
+
+# Spark checkpoint
+checkpoint/
+.checkpoint/
+
+# Airflow
+airflow/
+dags/*/__pycache__/
+
+# Python virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# temp files
+*.tmp
+temp/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+*.pyc
+.pytest_cache/

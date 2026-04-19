@@ -1,0 +1,195 @@
+services:
+  # Zookeeper for Kafka coordination
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - big_data_network
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Kafka Broker
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    networks:
+      - big_data_network
+    ports:
+      - "9092:9092"
+
+  # PostgreSQL Database
+  postgres-db:
+    image: postgres:15-alpine
+    container_name: postgres-db
+    environment:
+      POSTGRES_USER: ${DB_USER:-airflow}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-airflow}
+      POSTGRES_DB: ${DB_NAME:-clickstream_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init_db.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - big_data_network
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-airflow}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for Airflow
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    networks:
+      - big_data_network
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Airflow Webserver
+  airflow-webserver:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: airflow-webserver
+    depends_on:
+      postgres-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      AIRFLOW_HOME: /airflow
+      AIRFLOW__CORE__DAGS_FOLDER: /airflow/dags
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql://${DB_USER:-airflow}:${DB_PASSWORD:-airflow}@postgres-db:5432/${DB_NAME:-clickstream_db}
+      AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
+      AIRFLOW__CELERY__RESULT_BACKEND: postgresql://${DB_USER:-airflow}:${DB_PASSWORD:-airflow}@postgres-db:5432/${DB_NAME:-clickstream_db}
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "True"
+    volumes:
+      - ./dags:/airflow/dags
+      - ./logs:/airflow/logs
+      - ./plugins:/airflow/plugins
+    networks:
+      - big_data_network
+    ports:
+      - "18080:8080"
+    command: >
+      bash -c "
+      airflow db init &&
+      airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com || true &&
+      airflow webserver
+      "
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # Airflow Scheduler
+  airflow-scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    container_name: airflow-scheduler
+    depends_on:
+      postgres-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      AIRFLOW_HOME: /airflow
+      AIRFLOW__CORE__DAGS_FOLDER: /airflow/dags
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql://${DB_USER:-airflow}:${DB_PASSWORD:-airflow}@postgres-db:5432/${DB_NAME:-clickstream_db}
+      AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
+      AIRFLOW__CELERY__RESULT_BACKEND: postgresql://${DB_USER:-airflow}:${DB_PASSWORD:-airflow}@postgres-db:5432/${DB_NAME:-clickstream_db}
+    volumes:
+      - ./dags:/airflow/dags
+      - ./logs:/airflow/logs
+      - ./plugins:/airflow/plugins
+    networks:
+      - big_data_network
+    command: airflow scheduler
+    restart: on-failure
+
+  # Note: Spark is installed via PySpark pip package in stream-processor
+  # No separate Spark Master/Worker containers needed for this deployment
+
+  # Python Kafka Producer Service
+  python-producer:
+    build:
+      context: .
+      dockerfile: Dockerfile.producer
+    container_name: python-producer
+    depends_on:
+      kafka:
+        condition: service_started
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_TOPIC: clickstream_topic
+      LOG_LEVEL: INFO
+    networks:
+      - big_data_network
+    volumes:
+      - ./producer_logs:/app/logs
+    restart: on-failure
+    command: python /app/producer.py
+
+  # PySpark Stream Processor Service
+  stream-processor:
+    build:
+      context: .
+      dockerfile: Dockerfile.processor
+    container_name: stream-processor
+    depends_on:
+      kafka:
+        condition: service_started
+      postgres-db:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_TOPIC: clickstream_topic
+      DB_HOST: postgres-db
+      DB_PORT: 5432
+      DB_USER: ${DB_USER:-airflow}
+      DB_PASSWORD: ${DB_PASSWORD:-airflow}
+      DB_NAME: ${DB_NAME:-clickstream_db}
+      LOG_LEVEL: INFO
+    networks:
+      - big_data_network
+    volumes:
+      - ./processor_logs:/app/logs
+    restart: on-failure
+    command: python /app/stream_processor.py
+
+networks:
+  big_data_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
