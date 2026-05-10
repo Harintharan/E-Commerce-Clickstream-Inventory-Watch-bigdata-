@@ -92,7 +92,7 @@ services:
       SMTP_HOST: smtp.gmail.com
       SMTP_PORT: 587
       SMTP_USER: yarlhubgof@gmail.com
-      SMTP_PASSWORD: thla jjyx ryij qlfn
+      SMTP_PASSWORD: "thla jjyx ryij qlfn"
       REPORT_RECIPIENT: thevarasathayanan@gmail.com
       REPORT_SENDER: yarlhubgof@gmail.com
     volumes:
@@ -139,7 +139,7 @@ services:
       SMTP_HOST: smtp.gmail.com
       SMTP_PORT: 587
       SMTP_USER: yarlhubgof@gmail.com
-      SMTP_PASSWORD: thla jjyx ryij qlfn
+      SMTP_PASSWORD: "thla jjyx ryij qlfn"
       REPORT_RECIPIENT: thevarasathayanan@gmail.com
       REPORT_SENDER: yarlhubgof@gmail.com
     volumes:
