@@ -6,6 +6,18 @@
 -- via the POSTGRES_DB=airflow environment variable in docker-compose.yaml
 
 -- Table for real-time product metrics from Spark Streaming
+CREATE TABLE IF NOT EXISTS clickstream_events (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    product_id INTEGER NOT NULL,
+    event_type VARCHAR(50) NOT NULL,
+    event_timestamp TIMESTAMP NOT NULL,
+    session_id VARCHAR(100),
+    device VARCHAR(50),
+    kafka_timestamp TIMESTAMP,
+    processed_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS product_metrics (
     id SERIAL PRIMARY KEY,
     product_id INTEGER NOT NULL,
@@ -56,6 +68,12 @@ CREATE TABLE IF NOT EXISTS daily_product_summary (
 
 -- Create indexes for performance
 CREATE INDEX IF NOT EXISTS idx_product_metrics_product_id ON product_metrics (product_id);
+
+CREATE INDEX IF NOT EXISTS idx_clickstream_events_event_date ON clickstream_events (event_timestamp);
+
+CREATE INDEX IF NOT EXISTS idx_clickstream_events_user_id ON clickstream_events (user_id);
+
+CREATE INDEX IF NOT EXISTS idx_clickstream_events_event_type ON clickstream_events (event_type);
 
 CREATE INDEX IF NOT EXISTS idx_product_metrics_timestamp ON product_metrics (window_start, window_end);
 

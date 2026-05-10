@@ -7,7 +7,12 @@ RUN apt-get update && apt-get install -y \
     postgresql-client \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /airflow \
-    && chown -R airflow:0 /airflow
+    && mkdir -p /airflow/logs/scheduler \
+    && mkdir -p /airflow/logs/dag_processor_manager \
+    && mkdir -p /airflow/logs/reports \
+    && mkdir -p /airflow/plugins \
+    && chown -R airflow:0 /airflow \
+    && chmod -R 777 /airflow
 
 USER airflow
 

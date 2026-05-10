@@ -253,6 +253,47 @@ class StreamProcessor:
             logger.error(f"Failed to write to PostgreSQL: {e}")
             raise
 
+    def write_raw_events_to_postgresql(self, df: DataFrame, table_name: str = "clickstream_events") -> None:
+        """
+        Write raw clickstream events to PostgreSQL for user-level batch analytics.
+        """
+        try:
+            output_df = df.select(
+                col("user_id"),
+                col("product_id"),
+                col("event_type"),
+                col("event_time").alias("event_timestamp"),
+                col("session_id"),
+                col("device"),
+                col("kafka_timestamp"),
+                current_timestamp().alias("processed_timestamp")
+            )
+
+            def write_to_jdbc(batch_df: DataFrame, batch_id: int):
+                batch_df.write \
+                    .format("jdbc") \
+                    .option("url", self.jdbc_url) \
+                    .option("dbtable", table_name) \
+                    .option("user", DB_USER) \
+                    .option("password", DB_PASSWORD) \
+                    .option("driver", "org.postgresql.Driver") \
+                    .mode("append") \
+                    .save()
+
+            query = output_df \
+                .writeStream \
+                .foreachBatch(write_to_jdbc) \
+                .trigger(processingTime="30 seconds") \
+                .option("checkpointLocation", f"{CHECKPOINT_DIR}/raw_events") \
+                .start()
+
+            logger.info(f"Raw event PostgreSQL output stream started for table: {table_name}")
+            return query
+
+        except Exception as e:
+            logger.error(f"Failed to write raw events to PostgreSQL: {e}")
+            raise
+
     def run(self) -> None:
         """
         Main execution pipeline
@@ -278,6 +319,7 @@ class StreamProcessor:
 
             # Write to console and PostgreSQL
             console_query = self.write_to_console(output_df)
+            raw_events_query = self.write_raw_events_to_postgresql(df)
             db_query = self.write_to_postgresql(output_df)
 
             # Keep streaming

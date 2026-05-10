@@ -84,11 +84,10 @@ services:
       AIRFLOW_HOME: /airflow
       AIRFLOW__CORE__DAGS_FOLDER: /airflow/dags
       AIRFLOW__CORE__LOAD_EXAMPLES: "False"
-      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql://${DB_USER:-airflow}:${DB_PASSWORD:-airflow}@postgres-db:5432/${DB_NAME:-clickstream_db}
-      AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
-      AIRFLOW__CELERY__RESULT_BACKEND: postgresql://${DB_USER:-airflow}:${DB_PASSWORD:-airflow}@postgres-db:5432/${DB_NAME:-clickstream_db}
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "True"
+      AIRFLOW__LOGGING__CHANGE_LOG_FILE_PERMISSIONS: "False"
       SMTP_HOST: smtp.gmail.com
       SMTP_PORT: 587
       SMTP_USER: yarlhubgof@gmail.com
@@ -132,10 +131,9 @@ services:
       AIRFLOW_HOME: /airflow
       AIRFLOW__CORE__DAGS_FOLDER: /airflow/dags
       AIRFLOW__CORE__LOAD_EXAMPLES: "False"
-      AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql://${DB_USER:-airflow}:${DB_PASSWORD:-airflow}@postgres-db:5432/${DB_NAME:-clickstream_db}
-      AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
-      AIRFLOW__CELERY__RESULT_BACKEND: postgresql://${DB_USER:-airflow}:${DB_PASSWORD:-airflow}@postgres-db:5432/${DB_NAME:-clickstream_db}
+      AIRFLOW__LOGGING__CHANGE_LOG_FILE_PERMISSIONS: "False"
       SMTP_HOST: smtp.gmail.com
       SMTP_PORT: 587
       SMTP_USER: yarlhubgof@gmail.com

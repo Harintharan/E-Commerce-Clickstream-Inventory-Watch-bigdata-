@@ -119,6 +119,21 @@ def create_tables(**context) -> None:
         db = DatabaseConnector(DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME)
         db.connect()
 
+        # Create raw clickstream events table
+        db.execute_query("""
+            CREATE TABLE IF NOT EXISTS clickstream_events (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                product_id INTEGER NOT NULL,
+                event_type VARCHAR(50) NOT NULL,
+                event_timestamp TIMESTAMP NOT NULL,
+                session_id VARCHAR(100),
+                device VARCHAR(50),
+                kafka_timestamp TIMESTAMP,
+                processed_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+
         # Create product_metrics table
         db.execute_query("""
             CREATE TABLE IF NOT EXISTS product_metrics (
@@ -171,6 +186,21 @@ def create_tables(**context) -> None:
         """)
 
         # Create indexes
+        db.execute_query("""
+            CREATE INDEX IF NOT EXISTS idx_clickstream_events_event_date 
+            ON clickstream_events(event_timestamp);
+        """)
+
+        db.execute_query("""
+            CREATE INDEX IF NOT EXISTS idx_clickstream_events_user_id 
+            ON clickstream_events(user_id);
+        """)
+
+        db.execute_query("""
+            CREATE INDEX IF NOT EXISTS idx_clickstream_events_event_type 
+            ON clickstream_events(event_type);
+        """)
+
         db.execute_query("""
             CREATE INDEX IF NOT EXISTS idx_product_metrics_product_id 
             ON product_metrics(product_id);
@@ -227,14 +257,14 @@ def segment_users(**context) -> Dict[str, Any]:
                 COUNT(DISTINCT CASE WHEN event_type = 'view' THEN product_id END) as products_viewed,
                 0 as products_purchased
             FROM (
-                SELECT user_id, event_type, product_id, timestamp
-                FROM product_metrics
-                WHERE CAST(window_start AS DATE) = %s
+                SELECT user_id, event_type, product_id, event_timestamp
+                FROM clickstream_events
+                WHERE CAST(event_timestamp AS DATE) = %s
                   AND event_type IN ('view', 'add_to_cart')
                   AND user_id NOT IN (
                     SELECT DISTINCT user_id
-                    FROM product_metrics
-                    WHERE CAST(window_start AS DATE) = %s
+                    FROM clickstream_events
+                    WHERE CAST(event_timestamp AS DATE) = %s
                       AND event_type = 'purchase'
                   )
             ) AS window_shoppers
@@ -251,25 +281,22 @@ def segment_users(**context) -> Dict[str, Any]:
             (user_id, segment_type, segment_date, view_count, purchase_count, 
              products_viewed, products_purchased)
             SELECT 
-                user_id,
+                pm.user_id,
                 'Buyer' as segment_type,
                 %s as segment_date,
-                COUNT(CASE WHEN event_type = 'view' THEN 1 END) as view_count,
-                COUNT(CASE WHEN event_type = 'purchase' THEN 1 END) as purchase_count,
-                COUNT(DISTINCT CASE WHEN event_type = 'view' THEN product_id END) as products_viewed,
-                COUNT(DISTINCT CASE WHEN event_type = 'purchase' THEN product_id END) as products_purchased
-            FROM (
-                SELECT user_id, event_type, product_id, timestamp
-                FROM product_metrics
-                WHERE CAST(window_start AS DATE) = %s
-            ) AS buyer_events
-            WHERE user_id IN (
+                COUNT(CASE WHEN pm.event_type = 'view' THEN 1 END) as view_count,
+                COUNT(CASE WHEN pm.event_type = 'purchase' THEN 1 END) as purchase_count,
+                COUNT(DISTINCT CASE WHEN pm.event_type = 'view' THEN pm.product_id END) as products_viewed,
+                COUNT(DISTINCT CASE WHEN pm.event_type = 'purchase' THEN pm.product_id END) as products_purchased
+            FROM clickstream_events pm
+            WHERE CAST(pm.event_timestamp AS DATE) = %s
+              AND pm.user_id IN (
                 SELECT DISTINCT user_id
-                FROM product_metrics
-                WHERE CAST(window_start AS DATE) = %s
+                FROM clickstream_events
+                WHERE CAST(event_timestamp AS DATE) = %s
                   AND event_type = 'purchase'
-            )
-            GROUP BY user_id
+              )
+            GROUP BY pm.user_id
             ON CONFLICT (user_id, segment_date) DO UPDATE SET
                 segment_type = EXCLUDED.segment_type,
                 view_count = EXCLUDED.view_count,
