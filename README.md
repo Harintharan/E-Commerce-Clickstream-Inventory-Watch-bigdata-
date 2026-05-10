@@ -1,407 +1,324 @@
-# E-Commerce Clickstream & Inventory Watch System
+# E-Commerce Clickstream Inventory Watch
 
-A production-ready, fully containerized big data engineering project for processing e-commerce clickstream events, detecting anomalies, and generating business intelligence.
+A containerized data engineering project for real-time e-commerce clickstream ingestion, product behavior analytics, flash-sale detection, user segmentation, and daily reporting.
 
-## Architecture Overview
+## Overview
 
+The system simulates e-commerce user activity, streams events through Kafka, processes product metrics, stores analytics in PostgreSQL, and uses Airflow to generate daily business reports.
+
+Core capabilities:
+
+- Real-time clickstream event generation
+- Kafka-based event ingestion
+- Stream processing for product metrics
+- Flash-sale candidate detection
+- Daily user segmentation
+- Daily product summary reports in TXT, CSV, and HTML email formats
+- Automatic cleanup of report files older than 30 days
+
+## Architecture
+
+```text
+Python Producer
+    -> Kafka topic: clickstream_topic
+    -> Stream Processor
+    -> PostgreSQL
+    -> Airflow DAG
+    -> TXT/CSV reports and email summary
 ```
-┌─────────────┐
-│   Kafka     │ (Message Broker)
-│  Producer   │
-└──────┬──────┘
-       │
-       ├──────────┐
-       │          │
-  ┌────▼──┐   ┌──▼──────────┐
-  │ Kafka │   │     DAG      │
-  │Topic  │   │ (Airflow)    │
-  └────┬──┘   └──────────────┘
-       │
-  ┌────▼──────────────┐
-  │  PySpark Stream   │
-  │   Processor       │
-  └────┬──────────────┘
-       │
-  ┌────▼──────────────┐
-  │   PostgreSQL      │
-  │   Database        │
-  └───────────────────┘
+
+## Services
+
+| Service | Purpose | URL / Port |
+| --- | --- | --- |
+| Kafka | Event broker | `localhost:9092` |
+| Kafka UI | Topic/message inspection | `http://localhost:9000` |
+| PostgreSQL | Analytics database | `localhost:5432` |
+| Airflow Webserver | DAG UI | `http://localhost:18080` |
+| Airflow Scheduler | Batch orchestration | Internal |
+| Python Producer | Simulated clickstream source | Internal |
+| Stream Processor | Kafka consumer and analytics processor | Internal |
+
+Airflow login:
+
+```text
+Username: admin
+Password: admin
 ```
 
-## System Components
+## Project Structure
 
-### 1. **Kafka** (Message Broker)
-- Receives clickstream events from the producer
-- Topic: `clickstream_topic`
-- Enables real-time data ingestion
+```text
+.
+├── dags/
+│   └── dag_segmentation.py       # Airflow DAG for daily batch analytics and reporting
+├── Dockerfile.airflow            # Airflow image
+├── Dockerfile.processor          # Stream processor image
+├── Dockerfile.producer           # Producer image
+├── docker-compose.yaml           # Full local stack
+├── init_db.sql                   # PostgreSQL schema
+├── producer.py                   # Clickstream event producer
+├── stream_processor.py           # Stream processor and fallback processor
+├── query_helper.py               # Local database query helper
+├── requirements.txt              # Python dependencies
+├── Makefile                      # Common commands
+└── README.md                     # Project guide
+```
 
-### 2. **Python Producer**
-- Generates simulated e-commerce events
-- Event schema: `{user_id, product_id, event_type, timestamp, session_id, device}`
-- **Feature**: Injects anomalous patterns (high views, low purchases) to trigger Flash Sale detection
-- Runs continuously in Docker container
+## Data Model
 
-### 3. **PySpark Structured Streaming Processor**
-- Consumes events from Kafka
-- Performs 10-minute sliding window aggregation
-- **Flash Sale Trigger Logic**:
-  - Condition: Views > 100 AND Purchases < 5
-  - Suggests promotional discount when met
-- Writes processed metrics to PostgreSQL
+Main tables:
 
-### 4. **Apache Airflow**
-- Schedules daily batch processing jobs
-- **Tasks**:
-  1. User Segmentation (Window Shoppers vs Buyers)
-  2. Daily Product Summary (Top 5 products)
-  3. Data Quality Validation
-- Dashboard available at `http://localhost:8080`
+| Table | Description |
+| --- | --- |
+| `clickstream_events` | Raw event-level clickstream data |
+| `product_metrics` | Streaming product metrics by time window |
+| `daily_product_summary` | Daily product totals used for reports |
+| `user_segments` | Daily user classification as Buyer or Window Shopper |
 
-### 5. **PostgreSQL Database**
-- Stores all processed metrics and insights
-- Tables: `product_metrics`, `user_segments`, `daily_product_summary`
+Event types:
 
-## Prerequisites
+```text
+view
+add_to_cart
+purchase
+```
 
-- Docker & Docker Compose (v20.10+)
-- 8GB+ RAM available
-- 10GB+ disk space
-- Windows, macOS, or Linux
+Flash-sale rule:
 
-## Quick Start
+```text
+total_views > 100 AND total_purchases < 5
+```
 
-### Step 1: Clone/Setup Project
+## Getting Started
+
+### Prerequisites
+
+- Docker
+- Docker Compose
+- At least 8 GB RAM recommended
+
+### Start the stack
 
 ```bash
-# Navigate to project directory
-cd big_data_mini_project
+docker compose up -d --build
 ```
 
-### Step 2: Build and Start Services
+Check status:
 
 ```bash
-# Build all container images
-docker-compose build
-
-# Start all services (in foreground with logs)
-docker-compose up
-
-# OR start in background
-docker-compose up -d
-
-# Check status of all services
-docker-compose ps
+docker compose ps
 ```
 
-**Expected Output**:
-```
-NAME                             STATUS
-zookeeper                        Up (healthy)
-kafka                            Up (healthy)
-postgres-db                      Up (healthy)
-redis                            Up (healthy)
-airflow-webserver                Up (healthy)
-airflow-scheduler                Up (healthy)
-spark-master                     Up (healthy)
-spark-worker                     Up
-python-producer                  Up (restarting)
-stream-processor                 Up (restarting)
+Wait until the main services are running and healthy:
+
+```text
+kafka
+postgres-db
+redis
+airflow-webserver
+airflow-scheduler
+python-producer
+stream-processor
 ```
 
-### Step 3: Verify Kafka Producer
+### Open Airflow
+
+Open:
+
+```text
+http://localhost:18080
+```
+
+Enable and trigger the DAG:
+
+```text
+clickstream_daily_batch
+```
+
+## Airflow DAG
+
+DAG name:
+
+```text
+clickstream_daily_batch
+```
+
+Task flow:
+
+```text
+start
+  -> check_data_exist
+  -> [segment_users, generate_daily_summary]
+  -> generate_summary_report
+  -> send_summary_email
+  -> cleanup_old_reports
+  -> end
+```
+
+Task summary:
+
+| Task | Description |
+| --- | --- |
+| `check_data_exist` | Validates source tables and available clickstream data |
+| `segment_users` | Classifies users as Buyers or Window Shoppers |
+| `generate_daily_summary` | Builds daily product totals from raw events |
+| `generate_summary_report` | Writes TXT and CSV report files |
+| `send_summary_email` | Sends the styled HTML report email |
+| `cleanup_old_reports` | Deletes `.txt` and `.csv` reports older than 30 days |
+
+## Reports
+
+Reports are written inside the Airflow container:
+
+```text
+/airflow/logs/reports
+```
+
+File naming:
+
+```text
+summary_YYYY-MM-DD_YYYYMMDD_HHMMSS.txt
+summary_YYYY-MM-DD_YYYYMMDD_HHMMSS.csv
+```
+
+Example:
+
+```text
+summary_2026-05-10_20260510_170756.txt
+summary_2026-05-10_20260510_170756.csv
+```
+
+List reports:
 
 ```bash
-# Attach to Kafka container and verify messages are flowing
-docker exec -it kafka kafka-console-consumer \
-  --bootstrap-server localhost:9092 \
-  --topic clickstream_topic \
-  --from-beginning \
-  --max-messages 10
-
-# Expected output: JSON clickstream events
-# Example: {"user_id": 42, "product_id": 15, "event_type": "view", "timestamp": "2024-04-18T..."}
+docker compose exec airflow-webserver ls -lah /airflow/logs/reports
 ```
 
-### Step 4: Monitor PostgreSQL Data
+Read a TXT report:
 
 ```bash
-# Connect to PostgreSQL
-docker exec -it postgres-db psql -U airflow -d clickstream_db -c \
-  "SELECT * FROM product_metrics LIMIT 5;"
-
-# Monitor real-time processed metrics
-docker exec -it postgres-db psql -U airflow -d clickstream_db -c \
-  "SELECT product_id, view_count, purchase_count, flash_sale_suggested 
-   FROM product_metrics 
-   WHERE flash_sale_suggested = true 
-   ORDER BY view_count DESC LIMIT 5;"
+docker compose exec airflow-webserver cat /airflow/logs/reports/summary_2026-05-10_20260510_170756.txt
 ```
 
-### Step 5: Access Airflow Web UI
-
-1. Open browser: **`http://localhost:8080`**
-2. Login with:
-   - Username: `admin`
-   - Password: `admin`
-3. Enable and trigger the `clickstream_daily_batch` DAG
-4. Monitor task execution in real-time
-
-### Step 6: View Spark Master UI
-
-1. Open browser: **`http://localhost:8081`**
-2. Monitor streaming application performance
-3. Check worker status and memory/CPU utilization
-
-## Configuration
-
-### Environment Variables (`.env` file)
+Read a CSV report:
 
 ```bash
-# Database
-DB_USER=airflow
-DB_PASSWORD=airflow
-DB_NAME=clickstream_db
-
-# Kafka
-KAFKA_BOOTSTRAP_SERVERS=kafka:29092
-KAFKA_TOPIC=clickstream_topic
-
-# Producer
-BATCH_SIZE=10              # Events per batch
-BATCH_INTERVAL_SECONDS=5   # Time between batches
-
-# Logging
-LOG_LEVEL=INFO
+docker compose exec airflow-webserver cat /airflow/logs/reports/summary_2026-05-10_20260510_170756.csv
 ```
 
-### Tuning for Production
+Copy reports to the local project directory:
 
-#### Producer Throughput
 ```bash
-# Increase batch size in .env
-BATCH_SIZE=100
-BATCH_INTERVAL_SECONDS=2
+docker compose cp airflow-webserver:/airflow/logs/reports ./reports
 ```
 
-#### Spark Streaming
-Edit `stream_processor.py`:
-```python
-WINDOW_DURATION = "5 minutes"      # Smaller window
-SLIDING_INTERVAL = "30 seconds"    # More frequent updates
-WATERMARK_DELAY = "10 minutes"     # Handle late data
-```
+## Useful Commands
 
-#### Airflow Concurrency
-Edit `docker-compose.yaml` for airflow-scheduler:
-```yaml
-environment:
-  AIRFLOW__CORE__PARALLELISM: 16
-  AIRFLOW__CORE__MAX_ACTIVE_RUNS_PER_DAG: 4
-```
+Start services:
 
-## Verification Checklist
-
-- [ ] All containers are healthy: `docker-compose ps`
-- [ ] Producer sending events: `docker logs python-producer`
-- [ ] Kafka topic has messages: kafka-console-consumer
-- [ ] PostgreSQL tables populated: `SELECT COUNT(*) FROM product_metrics;`
-- [ ] Stream processing evidence: `docker logs stream-processor 2>&1 | grep "STREAM:"`
-- [ ] Airflow DAG visible in UI: `http://localhost:8080`
-
-## Monitoring & Debugging
-
-### Check Producer Logs
 ```bash
-docker logs python-producer --follow
+docker compose up -d
 ```
 
-### Check Stream Processor Logs
+Stop services:
+
 ```bash
-docker logs -f --tail 100 stream-processor 2>&1
+docker compose down
 ```
 
-Look for simple `STREAM:` lines. They show Kafka batches being consumed,
-window metrics being processed, and PostgreSQL writes completing.
+Rebuild services:
 
-### Monitor Kafka Broker
 ```bash
-docker logs kafka --follow
-docker exec -it kafka kafka-broker-api-versions.sh --bootstrap-server localhost:9092
+docker compose up -d --build
 ```
 
-### Query Anomalies (Flash Sale Triggers)
+View logs:
+
 ```bash
-docker exec -it postgres-db psql -U airflow -d clickstream_db -c \
-  "SELECT product_id, view_count, purchase_count, 
-          ROUND(conversion_rate, 2) as conv_rate
-   FROM product_metrics 
-   WHERE flash_sale_suggested = true 
-   ORDER BY view_count DESC LIMIT 10;"
+docker compose logs -f
 ```
 
-### View User Segments
+View producer logs:
+
 ```bash
-docker exec -it postgres-db psql -U airflow -d clickstream_db -c \
-  "SELECT segment_type, COUNT(*) as count 
-   FROM user_segments 
-   WHERE segment_date = CURRENT_DATE - 1 
+docker compose logs -f python-producer
+```
+
+View stream processor logs:
+
+```bash
+docker compose logs -f stream-processor
+```
+
+Connect to PostgreSQL:
+
+```bash
+docker compose exec postgres-db psql -U airflow -d clickstream_db
+```
+
+Query daily product summary:
+
+```bash
+docker compose exec postgres-db psql -U airflow -d clickstream_db -c \
+  "SELECT product_id, total_views, total_purchases, conversion_rate, flash_sale_recommended
+   FROM daily_product_summary
+   ORDER BY total_views DESC
+   LIMIT 10;"
+```
+
+Query user segments:
+
+```bash
+docker compose exec postgres-db psql -U airflow -d clickstream_db -c \
+  "SELECT segment_type, COUNT(*)
+   FROM user_segments
    GROUP BY segment_type;"
 ```
 
-## Data Schema
+## Configuration
 
-### `product_metrics` (Real-time)
-```
-product_id         INTEGER
-window_start       TIMESTAMP
-window_end         TIMESTAMP
-view_count         INTEGER
-cart_count         INTEGER
-purchase_count     INTEGER
-conversion_rate    DECIMAL(5,2)
-flash_sale_suggested BOOLEAN
-```
+Common environment variables:
 
-### `user_segments` (Daily)
-```
-user_id            INTEGER
-segment_type       VARCHAR (Window Shopper / Buyer)
-segment_date       DATE
-view_count         INTEGER
-purchase_count     INTEGER
-products_viewed    INTEGER
-```
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DB_USER` | `airflow` | PostgreSQL user |
+| `DB_PASSWORD` | `airflow` | PostgreSQL password |
+| `DB_NAME` | `clickstream_db` | PostgreSQL database |
+| `KAFKA_TOPIC` | `clickstream_topic` | Kafka event topic |
+| `LOG_LEVEL` | `INFO` | Application log level |
+| `SMTP_HOST` | `smtp.gmail.com` | Email server |
+| `SMTP_PORT` | `587` | Email server port |
+| `SMTP_USER` | unset | Sender email account |
+| `SMTP_PASSWORD` | unset | Email app password |
+| `REPORT_RECIPIENT` | unset | Report recipient |
 
-### `daily_product_summary` (Daily)
-```
-product_id         INTEGER
-summary_date       DATE
-total_views        INTEGER
-total_purchases    INTEGER
-conversion_rate    DECIMAL(5,2)
-flash_sale_recommended BOOLEAN
-```
+For production or shared environments, keep email credentials outside source control and inject them through environment variables or a secret manager.
 
-## File Structure
+## Cleanup
 
-```
-big_data_mini_project/
-├── docker-compose.yaml           # Service orchestration
-├── Dockerfile.producer           # Producer service
-├── Dockerfile.processor          # Stream processor service
-├── Dockerfile.airflow            # Airflow service
-├── producer.py                   # Kafka data generator
-├── stream_processor.py           # PySpark streaming logic
-├── dags/
-│   └── dag_segmentation.py       # Airflow DAG
-├── init_db.sql                   # Database initialization
-├── requirements.txt              # Python dependencies
-├── .env                          # Environment variables
-├── producer_logs/                # Producer logs
-├── processor_logs/               # Processor logs
-├── logs/                         # Airflow logs
-└── README.md                     # This file
-```
-
-## Stopping Services
+Remove containers:
 
 ```bash
-# Stop all services and remove containers
-docker-compose down
-
-# Stop services but keep volumes (database data retained)
-docker-compose down -v
-
-# Stop without removing
-docker-compose stop
-
-# Restart services
-docker-compose restart
+docker compose down
 ```
 
-## Performance Notes
+Remove containers and named volumes:
 
-### Expected Throughput
-- Producer: ~100-1000 events/second (configurable)
-- Spark Processing: <2s latency with 10-min window
-- Database: Can handle 10M+ records with proper indexing
-
-### Resource Requirements
-- Docker Memory: 6-8GB
-- CPU: 4+ cores recommended
-- Disk: 5GB for database and logs
-
-## Troubleshooting
-
-### Issue: Producer not sending events
 ```bash
-# Check connectivity
-docker exec python-producer python -c "from kafka import KafkaProducer; print('OK')"
-# Check logs
-docker logs python-producer
+docker compose down -v
 ```
 
-### Issue: Stream processor not receiving data
-```bash
-# Verify Kafka topic exists
-docker exec kafka kafka-topics.sh --list --bootstrap-server localhost:9092
-# Check consumer lag
-docker exec kafka kafka-consumer-groups.sh --bootstrap-server localhost:9092 --list
+The Airflow DAG also runs `cleanup_old_reports` after email delivery. It deletes generated `.txt` and `.csv` report files older than 30 days from:
+
+```text
+/airflow/logs/reports
 ```
 
-### Issue: Airflow DAG not showing
-```bash
-# Restart scheduler
-docker-compose restart airflow-scheduler
-# Check DAG parsing errors
-docker logs airflow-scheduler
-```
+## Notes
 
-### Issue: PostgreSQL connection refused
-```bash
-# Verify database is ready
-docker exec postgres-db pg_isready -U airflow
-# Check logs
-docker logs postgres-db
-```
-
-## Production Deployment
-
-### Security Hardening
-1. Change default credentials in `.env`
-2. Enable Kafka authentication (SASL/SSL)
-3. Use secrets management (AWS Secrets Manager, Vault)
-4. Restrict network access with firewall rules
-
-### High Availability
-1. Add Kafka brokers (multi-broker cluster)
-2. Replicate PostgreSQL (primary-replica setup)
-3. Run multiple Airflow worker instances
-4. Use external Celery backend instead of Redis
-
-### Monitoring
-1. Add Prometheus exporters for metrics
-2. Configure Grafana dashboards
-3. Set up alert rules for anomalies
-4. Enable central logging with ELK stack
-
-## Contributors
-
-- Data Engineering Team
-- Academic Project (Semester 8)
-
-## License
-
-This project is for educational purposes.
-
----
-
-## Support
-
-For issues or questions:
-1. Check logs: `docker logs <service_name>`
-2. Review data in PostgreSQL
-3. Verify Kafka topic messages
-4. Check Airflow task execution history
-
-**Last Updated**: April 2024
+- Daily summary totals are calculated from `clickstream_events`, the raw source of truth.
+- The top 5 product table is a ranking view only.
+- Email summary cards use totals across all daily product rows.
+- CSV reports contain product-level daily summary rows only.
+- TXT reports include the top product ranking and user segmentation summary.
