@@ -70,6 +70,7 @@ services:
 
   # Airflow Webserver
   airflow-webserver:
+    image: airflow-webserver:latest
     build:
       context: .
       dockerfile: Dockerfile.airflow
@@ -111,6 +112,7 @@ services:
 
   # Airflow Scheduler
   airflow-scheduler:
+    image: airflow-scheduler:latest
     build:
       context: .
       dockerfile: Dockerfile.airflow
@@ -142,6 +144,7 @@ services:
 
   # Python Kafka Producer Service
   python-producer:
+    image: python-producer:latest
     build:
       context: .
       dockerfile: Dockerfile.producer
@@ -162,6 +165,7 @@ services:
 
   # PySpark Stream Processor Service
   stream-processor:
+    image: stream-processor:latest
     build:
       context: .
       dockerfile: Dockerfile.processor
