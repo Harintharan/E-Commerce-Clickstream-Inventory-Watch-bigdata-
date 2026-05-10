@@ -89,6 +89,12 @@ services:
       AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
       AIRFLOW__CELERY__RESULT_BACKEND: postgresql://${DB_USER:-airflow}:${DB_PASSWORD:-airflow}@postgres-db:5432/${DB_NAME:-clickstream_db}
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "True"
+      SMTP_HOST: smtp.gmail.com
+      SMTP_PORT: 587
+      SMTP_USER: yarlhubgof@gmail.com
+      SMTP_PASSWORD: thla jjyx ryij qlfn
+      REPORT_RECIPIENT: thevarasathayanan@gmail.com
+      REPORT_SENDER: yarlhubgof@gmail.com
     volumes:
       - ./dags:/airflow/dags
       - ./logs:/airflow/logs
@@ -130,6 +136,12 @@ services:
       AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql://${DB_USER:-airflow}:${DB_PASSWORD:-airflow}@postgres-db:5432/${DB_NAME:-clickstream_db}
       AIRFLOW__CELERY__BROKER_URL: redis://redis:6379/0
       AIRFLOW__CELERY__RESULT_BACKEND: postgresql://${DB_USER:-airflow}:${DB_PASSWORD:-airflow}@postgres-db:5432/${DB_NAME:-clickstream_db}
+      SMTP_HOST: smtp.gmail.com
+      SMTP_PORT: 587
+      SMTP_USER: yarlhubgof@gmail.com
+      SMTP_PASSWORD: thla jjyx ryij qlfn
+      REPORT_RECIPIENT: thevarasathayanan@gmail.com
+      REPORT_SENDER: yarlhubgof@gmail.com
     volumes:
       - ./dags:/airflow/dags
       - ./logs:/airflow/logs

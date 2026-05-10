@@ -6,6 +6,10 @@ Categorizes users and generates daily product summaries
 from datetime import datetime, timedelta
 import logging
 from typing import Dict, List, Any
+import os
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
@@ -46,6 +50,15 @@ DB_PORT = 5432
 DB_USER = 'airflow'
 DB_PASSWORD = 'airflow'
 DB_NAME = 'clickstream_db'
+
+# Report configuration
+REPORT_DIR = '/airflow/logs/reports'
+SMTP_HOST = os.getenv('SMTP_HOST', 'smtp.gmail.com')
+SMTP_PORT = int(os.getenv('SMTP_PORT', '587'))
+SMTP_USER = os.getenv('SMTP_USER', 'your-email@gmail.com')
+SMTP_PASSWORD = os.getenv('SMTP_PASSWORD', 'your-app-password')
+REPORT_RECIPIENT = os.getenv('REPORT_RECIPIENT', 'admin@example.com')
+REPORT_SENDER = os.getenv('REPORT_SENDER', SMTP_USER)
 
 
 class DatabaseConnector:
@@ -401,6 +414,201 @@ def validate_data_quality(**context) -> None:
         raise AirflowException(f"Data quality check failed: {e}")
 
 
+def generate_summary_report(**context) -> Dict[str, Any]:
+    """
+    Generate formatted text report with top 5 most viewed products
+    Exports report to file for archival and email delivery
+    """
+    try:
+        execution_date = context['execution_date']
+        previous_date = execution_date - timedelta(days=1)
+        summary_date = previous_date.date()
+
+        db = DatabaseConnector(DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME)
+        db.connect()
+
+        logger.info(f"Generating summary report for {summary_date}")
+
+        # Create reports directory if it doesn't exist
+        os.makedirs(REPORT_DIR, exist_ok=True)
+
+        # Query top 5 most viewed products
+        top_products = db.execute_query("""
+            SELECT 
+                product_id, 
+                total_views, 
+                total_purchases,
+                total_carts,
+                conversion_rate,
+                flash_sale_recommended
+            FROM daily_product_summary
+            WHERE summary_date = %s
+            ORDER BY total_views DESC
+            LIMIT 5;
+        """, (summary_date,), fetch=True)
+
+        # Query user segments statistics
+        user_stats = db.execute_query("""
+            SELECT 
+                segment_type,
+                COUNT(*) as user_count,
+                ROUND(AVG(purchase_count), 2) as avg_purchases,
+                ROUND(AVG(view_count), 2) as avg_views
+            FROM user_segments
+            WHERE segment_date = %s
+            GROUP BY segment_type;
+        """, (summary_date,), fetch=True)
+
+        db.close()
+
+        # Generate formatted report
+        report_filename = f"daily_summary_{summary_date}.txt"
+        report_path = os.path.join(REPORT_DIR, report_filename)
+
+        with open(report_path, 'w') as f:
+            f.write("=" * 80 + "\n")
+            f.write(f"E-COMMERCE CLICKSTREAM - DAILY SUMMARY REPORT\n")
+            f.write(f"Date: {summary_date}\n")
+            f.write(f"Generated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}\n")
+            f.write("=" * 80 + "\n\n")
+
+            # Top 5 Products Section
+            f.write("TOP 5 MOST VIEWED PRODUCTS\n")
+            f.write("-" * 80 + "\n")
+            f.write(f"{'Rank':<6} {'Product ID':<12} {'Views':<10} {'Purchases':<12} {'Conv. Rate':<12} {'Flash Sale':<12}\n")
+            f.write("-" * 80 + "\n")
+
+            if top_products:
+                for idx, product in enumerate(top_products, 1):
+                    flash_sale = "YES" if product['flash_sale_recommended'] else "NO"
+                    f.write(
+                        f"{idx:<6} "
+                        f"{product['product_id']:<12} "
+                        f"{product['total_views']:<10} "
+                        f"{product['total_purchases']:<12} "
+                        f"{product['conversion_rate']:.2f}%{'':<8} "
+                        f"{flash_sale:<12}\n"
+                    )
+            else:
+                f.write("No product data available for this period\n")
+
+            f.write("\n")
+            f.write("USER SEGMENTATION SUMMARY\n")
+            f.write("-" * 80 + "\n")
+            f.write(f"{'Segment Type':<20} {'User Count':<15} {'Avg Purchases':<15} {'Avg Views':<15}\n")
+            f.write("-" * 80 + "\n")
+
+            if user_stats:
+                for stat in user_stats:
+                    f.write(
+                        f"{stat['segment_type']:<20} "
+                        f"{stat['user_count']:<15} "
+                        f"{stat['avg_purchases']:<15} "
+                        f"{stat['avg_views']:<15}\n"
+                    )
+            else:
+                f.write("No user segmentation data available for this period\n")
+
+            f.write("\n")
+            f.write("=" * 80 + "\n")
+            f.write("End of Report\n")
+            f.write("=" * 80 + "\n")
+
+        logger.info(f"Summary report generated successfully: {report_path}")
+
+        return {
+            'report_date': summary_date.isoformat(),
+            'report_path': report_path,
+            'top_products_count': len(top_products) if top_products else 0,
+            'status': 'completed'
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to generate summary report: {e}")
+        raise AirflowException(f"Summary report generation failed: {e}")
+
+
+def send_summary_email(**context) -> Dict[str, Any]:
+    """
+    Send formatted email with daily product summary
+    """
+    try:
+        # Get report path from previous task
+        task_instance = context['task_instance']
+        previous_task_data = task_instance.xcom_pull(task_ids='generate_summary_report')
+        
+        if not previous_task_data or 'report_path' not in previous_task_data:
+            logger.warning("No report path found from previous task")
+            return {'status': 'skipped', 'reason': 'No report generated'}
+
+        report_path = previous_task_data['report_path']
+        summary_date = previous_task_data['report_date']
+
+        # Read report content
+        if not os.path.exists(report_path):
+            logger.error(f"Report file not found: {report_path}")
+            raise AirflowException(f"Report file not found: {report_path}")
+
+        with open(report_path, 'r') as f:
+            report_content = f.read()
+
+        # Create email
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = f"Daily E-Commerce Summary Report - {summary_date}"
+        msg['From'] = REPORT_SENDER
+        msg['To'] = REPORT_RECIPIENT
+
+        # Create plain text part
+        text_part = MIMEText(report_content, 'plain')
+        msg.attach(text_part)
+
+        # Create HTML part for better formatting
+        html_content = f"""
+        <html>
+          <body style="font-family: Arial, sans-serif;">
+            <h2>E-Commerce Clickstream - Daily Summary Report</h2>
+            <p><strong>Report Date:</strong> {summary_date}</p>
+            <p><strong>Generated:</strong> {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}</p>
+            <hr>
+            <pre style="background-color: #f4f4f4; padding: 10px; overflow-x: auto;">
+{report_content}
+            </pre>
+            <hr>
+            <p><em>This is an automated report. Please do not reply to this email.</em></p>
+          </body>
+        </html>
+        """
+        html_part = MIMEText(html_content, 'html')
+        msg.attach(html_part)
+
+        # Send email
+        try:
+            logger.info(f"Connecting to SMTP server: {SMTP_HOST}:{SMTP_PORT}")
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+                server.starttls()
+                server.login(SMTP_USER, SMTP_PASSWORD)
+                server.send_message(msg)
+            logger.info(f"Email sent successfully to {REPORT_RECIPIENT}")
+        except smtplib.SMTPAuthenticationError:
+            logger.warning(f"SMTP authentication failed. Check SMTP_USER and SMTP_PASSWORD credentials.")
+            logger.info(f"Report available at: {report_path}")
+            return {'status': 'warning', 'reason': 'SMTP auth failed', 'report_path': report_path}
+        except smtplib.SMTPException as e:
+            logger.warning(f"SMTP error occurred: {e}. Report saved at: {report_path}")
+            return {'status': 'warning', 'reason': f'SMTP error: {str(e)}', 'report_path': report_path}
+
+        return {
+            'report_date': summary_date,
+            'recipient': REPORT_RECIPIENT,
+            'report_path': report_path,
+            'status': 'sent'
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to send summary email: {e}")
+        raise AirflowException(f"Email sending failed: {e}")
+
+
 # Task 1: Create tables
 create_tables_task = PythonOperator(
     task_id='create_tables',
@@ -432,8 +640,26 @@ data_quality_task = PythonOperator(
     dag=dag,
 )
 
+# Task 5: Generate summary report file
+generate_report_task = PythonOperator(
+    task_id='generate_summary_report',
+    python_callable=generate_summary_report,
+    provide_context=True,
+    dag=dag,
+)
+
+# Task 6: Send summary email
+send_email_task = PythonOperator(
+    task_id='send_summary_email',
+    python_callable=send_summary_email,
+    provide_context=True,
+    dag=dag,
+)
+
 # Define task dependencies
 create_tables_task >> segment_users_task
 create_tables_task >> generate_summary_task
 segment_users_task >> data_quality_task
 generate_summary_task >> data_quality_task
+data_quality_task >> generate_report_task
+generate_report_task >> send_email_task
