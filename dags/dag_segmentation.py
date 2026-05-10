@@ -11,6 +11,7 @@ import os
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+import sys
 
 from airflow import DAG
 from airflow.operators.empty import EmptyOperator
@@ -20,6 +21,9 @@ from airflow.exceptions import AirflowException
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+# Import configuration from config module
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config import DATABASE_CONFIG, REPORT_CONFIG, AIRFLOW_CONFIG
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -33,33 +37,37 @@ default_args = {
     'email_on_retry': False,
 }
 
+# Parse schedule and start date from config
+dag_start_date = datetime.strptime(AIRFLOW_CONFIG['dag_start_date'], '%Y-%m-%d')
+dag_schedule = AIRFLOW_CONFIG['dag_schedule_interval']
+
 # DAG definition
 dag = DAG(
     'clickstream_daily_batch',
     default_args=default_args,
     description='Daily batch processing for user segmentation and product analytics',
-    schedule_interval='0 23 * * *',  # Daily at 11 PM UTC
-    start_date=datetime(2024, 1, 1),
+    schedule_interval=dag_schedule,
+    start_date=dag_start_date,
     catchup=False,
     tags=['clickstream', 'batch', 'analytics'],
 )
 
-# Configuration
-DB_HOST = 'postgres-db'
-DB_PORT = 5432
-DB_USER = 'airflow'
-DB_PASSWORD = 'airflow'
-DB_NAME = 'clickstream_db'
+# Configuration from config.py
+DB_HOST = DATABASE_CONFIG['host']
+DB_PORT = DATABASE_CONFIG['port']
+DB_USER = DATABASE_CONFIG['user']
+DB_PASSWORD = DATABASE_CONFIG['password']
+DB_NAME = DATABASE_CONFIG['database']
 
-# Report configuration
-REPORT_DIR = '/airflow/logs/reports'
-REPORT_RETENTION_DAYS = 30
-SMTP_HOST = os.getenv('SMTP_HOST', 'smtp.gmail.com')
-SMTP_PORT = int(os.getenv('SMTP_PORT', '587'))
-SMTP_USER = os.getenv('SMTP_USER', 'your-email@gmail.com')
-SMTP_PASSWORD = os.getenv('SMTP_PASSWORD', 'your-app-password')
-REPORT_RECIPIENT = os.getenv('REPORT_RECIPIENT', 'admin@example.com')
-REPORT_SENDER = os.getenv('REPORT_SENDER', SMTP_USER)
+# Report configuration from config.py
+REPORT_DIR = REPORT_CONFIG['report_dir']
+REPORT_RETENTION_DAYS = REPORT_CONFIG['report_retention_days']
+SMTP_HOST = REPORT_CONFIG['smtp_host']
+SMTP_PORT = REPORT_CONFIG['smtp_port']
+SMTP_USER = REPORT_CONFIG['smtp_user']
+SMTP_PASSWORD = REPORT_CONFIG['smtp_password']
+REPORT_RECIPIENT = REPORT_CONFIG['report_recipient']
+REPORT_SENDER = REPORT_CONFIG['report_sender']
 
 
 def get_process_date(context) -> date:

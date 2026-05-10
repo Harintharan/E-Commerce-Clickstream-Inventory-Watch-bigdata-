@@ -48,6 +48,11 @@ processor_logs/
 *~
 .DS_Store
 
+# Environment variables (NEVER commit .env file)
+.env
+.env.local
+.env.*.local
+
 # Docker
 .dockerignore
 

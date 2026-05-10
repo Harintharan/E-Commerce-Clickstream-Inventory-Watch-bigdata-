@@ -144,6 +144,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    env_file: .env
     environment:
       AIRFLOW_HOME: /airflow
       AIRFLOW__CORE__DAGS_FOLDER: /airflow/dags
@@ -153,12 +154,12 @@ services:
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql://${DB_USER:-airflow}:${DB_PASSWORD:-airflow}@postgres-db:5432/${DB_NAME:-clickstream_db}
       AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "True"
       AIRFLOW__LOGGING__CHANGE_LOG_FILE_PERMISSIONS: "False"
-      SMTP_HOST: smtp.gmail.com
-      SMTP_PORT: 587
-      SMTP_USER: yarlhubgof@gmail.com
-      SMTP_PASSWORD: "thla jjyx ryij qlfn"
-      REPORT_RECIPIENT: thevarasathayanan@gmail.com
-      REPORT_SENDER: yarlhubgof@gmail.com
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASSWORD: ${SMTP_PASSWORD}
+      REPORT_RECIPIENT: ${REPORT_RECIPIENT}
+      REPORT_SENDER: ${REPORT_SENDER}
     volumes:
       - ./dags:/airflow/dags
       - ecommerce_airflow_logs:/airflow/logs
@@ -193,6 +194,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    env_file: .env
     environment:
       AIRFLOW_HOME: /airflow
       AIRFLOW__CORE__DAGS_FOLDER: /airflow/dags
@@ -201,12 +203,12 @@ services:
       AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql://${DB_USER:-airflow}:${DB_PASSWORD:-airflow}@postgres-db:5432/${DB_NAME:-clickstream_db}
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql://${DB_USER:-airflow}:${DB_PASSWORD:-airflow}@postgres-db:5432/${DB_NAME:-clickstream_db}
       AIRFLOW__LOGGING__CHANGE_LOG_FILE_PERMISSIONS: "False"
-      SMTP_HOST: smtp.gmail.com
-      SMTP_PORT: 587
-      SMTP_USER: yarlhubgof@gmail.com
-      SMTP_PASSWORD: "thla jjyx ryij qlfn"
-      REPORT_RECIPIENT: thevarasathayanan@gmail.com
-      REPORT_SENDER: yarlhubgof@gmail.com
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASSWORD: ${SMTP_PASSWORD}
+      REPORT_RECIPIENT: ${REPORT_RECIPIENT}
+      REPORT_SENDER: ${REPORT_SENDER}
     volumes:
       - ./dags:/airflow/dags
       - ecommerce_airflow_logs:/airflow/logs

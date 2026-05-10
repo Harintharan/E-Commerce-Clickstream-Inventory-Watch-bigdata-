@@ -1,24 +1,25 @@
 """
 Database Query Helper for Clickstream Project
 Provides utilities for querying and monitoring the PostgreSQL database
+Loads all configuration from config module
 """
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from datetime import datetime, timedelta
 import os
-import json
 
+from config import DATABASE_CONFIG
 
 class ClickstreamDB:
     """Helper class for database operations"""
 
     def __init__(self):
-        self.host = os.getenv('DB_HOST', 'localhost')
-        self.port = os.getenv('DB_PORT', '5432')
-        self.user = os.getenv('DB_USER', 'airflow')
-        self.password = os.getenv('DB_PASSWORD', 'airflow')
-        self.database = os.getenv('DB_NAME', 'clickstream_db')
+        self.host = DATABASE_CONFIG['host']
+        self.port = DATABASE_CONFIG['port']
+        self.user = DATABASE_CONFIG['user']
+        self.password = DATABASE_CONFIG['password']
+        self.database = DATABASE_CONFIG['database']
         self.connection = None
 
     def connect(self):

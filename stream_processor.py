@@ -19,12 +19,11 @@ from pyspark.sql.functions import (
     col as spark_col, current_timestamp, lit
 )
 from pyspark.sql.types import StructType, StructField, StringType, IntegerType, LongType
-
+from config import KAFKA_CONFIG, DATABASE_CONFIG, PROCESSOR_CONFIG, LOGGING_CONFIG
 
 # Configure logging
-log_level = os.getenv('LOG_LEVEL', 'INFO')
 logging.basicConfig(
-    level=getattr(logging, log_level),
+    level=getattr(logging, LOGGING_CONFIG['level']),
     format='%(asctime)s [%(levelname)-8s] %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
@@ -35,32 +34,24 @@ logging.getLogger('py4j').setLevel(logging.WARNING)
 logging.getLogger('py4j.java_gateway').setLevel(logging.WARNING)
 logging.getLogger('py4j.clientserver').setLevel(logging.WARNING)
 
-# Configuration
-KAFKA_BOOTSTRAP_SERVERS = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'kafka:29092')
-KAFKA_TOPIC = os.getenv('KAFKA_TOPIC', 'clickstream_topic')
-DB_HOST = os.getenv('DB_HOST', 'postgres-db')
-DB_PORT = os.getenv('DB_PORT', '5432')
-DB_USER = os.getenv('DB_USER', 'airflow')
-DB_PASSWORD = os.getenv('DB_PASSWORD', 'airflow')
-DB_NAME = os.getenv('DB_NAME', 'clickstream_db')
-CHECKPOINT_DIR = '/app/checkpoint'
-
-# Flash Sale Trigger Configuration
-# Requirement: High Interest (>100 views) + Low Conversion (<5 purchases)
-FLASH_SALE_VIEW_THRESHOLD = 100  # PRODUCTION: >100 views
-FLASH_SALE_PURCHASE_THRESHOLD = 5  # PRODUCTION: <5 purchases
-
-# Window Configuration
-WINDOW_DURATION_MINUTES = 10  # Must match WINDOW_DURATION
-SLIDING_INTERVAL_MINUTES = 1   # Must match SLIDING_INTERVAL
-
-WINDOW_DURATION = "10 minutes"  
-SLIDING_INTERVAL = "1 minute"  
-WATERMARK_DELAY = "30 seconds"
-# Fallback processor batch configuration
-FALLBACK_FLUSH_BATCH_SIZE = 100  # Flush aggregates to DB every N events
-FALLBACK_EVIDENCE_INTERVAL = int(os.getenv('FALLBACK_EVIDENCE_INTERVAL', '25'))
-
+# Configuration from config.py
+KAFKA_BOOTSTRAP_SERVERS = KAFKA_CONFIG['bootstrap_servers'][0]
+KAFKA_TOPIC = KAFKA_CONFIG['topic']
+DB_HOST = DATABASE_CONFIG['host']
+DB_PORT = DATABASE_CONFIG['port']
+DB_USER = DATABASE_CONFIG['user']
+DB_PASSWORD = DATABASE_CONFIG['password']
+DB_NAME = DATABASE_CONFIG['database']
+CHECKPOINT_DIR = PROCESSOR_CONFIG['checkpoint_dir']
+FLASH_SALE_VIEW_THRESHOLD = PROCESSOR_CONFIG['flash_sale_view_threshold']
+FLASH_SALE_PURCHASE_THRESHOLD = PROCESSOR_CONFIG['flash_sale_purchase_threshold']
+WINDOW_DURATION = PROCESSOR_CONFIG['window_duration']
+SLIDING_INTERVAL = PROCESSOR_CONFIG['sliding_interval']
+WATERMARK_DELAY = PROCESSOR_CONFIG['watermark_delay']
+WINDOW_DURATION_MINUTES = PROCESSOR_CONFIG['window_duration_minutes']
+SLIDING_INTERVAL_MINUTES = PROCESSOR_CONFIG['sliding_interval_minutes']
+FALLBACK_FLUSH_BATCH_SIZE = PROCESSOR_CONFIG['fallback_flush_batch_size']
+FALLBACK_EVIDENCE_INTERVAL = PROCESSOR_CONFIG['fallback_evidence_interval']
 
 # Define schema for incoming Kafka events
 EVENT_SCHEMA = StructType([
@@ -87,13 +78,13 @@ class StreamProcessor:
         """Initialize Spark session with necessary packages"""
         try:
             self.spark = SparkSession.builder \
-                .appName("ClickstreamProcessor") \
+                .appName(os.getenv('SPARK_APP_NAME', 'ClickstreamProcessor')) \
                 .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.postgresql:postgresql:42.6.0") \
-                .config("spark.sql.streaming.schemaInference", "true") \
+                .config("spark.sql.streaming.schemaInference", os.getenv('SPARK_SQL_STREAMING_SCHEMA_INFERENCE', 'true')) \
                 .config("spark.sql.streaming.checkpointLocation", CHECKPOINT_DIR) \
                 .getOrCreate()
 
-            self.spark.sparkContext.setLogLevel("ERROR")
+            self.spark.sparkContext.setLogLevel(os.getenv('SPARK_LOG_LEVEL', 'ERROR'))
             # Suppress verbose Spark warnings
             logging.getLogger('org.apache.spark.sql.streaming').setLevel(logging.ERROR)
             logging.getLogger('org.apache.kafka.common.config').setLevel(logging.ERROR)

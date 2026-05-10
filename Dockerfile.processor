@@ -16,6 +16,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Pre-download Spark JARs during build (cache them in Docker layer)
 RUN python3 -c "from pyspark.sql import SparkSession; SparkSession.builder.config('spark.jars.packages', 'org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.postgresql:postgresql:42.6.0').getOrCreate()" 2>&1 | grep -E "(downloading|found)" || true
 
+# Copy configuration and environment files
+COPY config.py .
+COPY .env .
+
 # Copy stream processor script
 COPY stream_processor.py .
 

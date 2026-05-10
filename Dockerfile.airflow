@@ -14,7 +14,8 @@ RUN mkdir -p /airflow \
 
 USER airflow
 
-# Copy DAGs
+# Copy shared configuration and DAGs
+COPY config.py /airflow/config.py
 COPY dags /airflow/dags
 
 WORKDIR /airflow
