@@ -25,9 +25,15 @@ from pyspark.sql.types import StructType, StructField, StringType, IntegerType, 
 log_level = os.getenv('LOG_LEVEL', 'INFO')
 logging.basicConfig(
     level=getattr(logging, log_level),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s [%(levelname)-8s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+
+# Suppress verbose Spark/JVM logs
+logging.getLogger('py4j').setLevel(logging.WARNING)
+logging.getLogger('py4j.java_gateway').setLevel(logging.WARNING)
+logging.getLogger('py4j.clientserver').setLevel(logging.WARNING)
 
 # Configuration
 KAFKA_BOOTSTRAP_SERVERS = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'kafka:29092')
@@ -40,11 +46,18 @@ DB_NAME = os.getenv('DB_NAME', 'clickstream_db')
 CHECKPOINT_DIR = '/app/checkpoint'
 
 # Flash Sale Trigger Configuration
-FLASH_SALE_VIEW_THRESHOLD = 15
-FLASH_SALE_PURCHASE_THRESHOLD = 2
-WINDOW_DURATION = "1 minute"
-SLIDING_INTERVAL = "30 seconds"
+# Requirement: High Interest (>100 views) + Low Conversion (<5 purchases)
+FLASH_SALE_VIEW_THRESHOLD = 100  # PRODUCTION: >100 views
+FLASH_SALE_PURCHASE_THRESHOLD = 5  # PRODUCTION: <5 purchases
+# Window Configuration
+WINDOW_DURATION_MINUTES = 10  # Must match WINDOW_DURATION
+SLIDING_INTERVAL_MINUTES = 1   # Must match SLIDING_INTERVAL
+WINDOW_DURATION = "10 minutes"  # Production requirement
+SLIDING_INTERVAL = "1 minute"   # Check every minute
 WATERMARK_DELAY = "30 seconds"
+# Fallback processor batch configuration
+FALLBACK_FLUSH_BATCH_SIZE = 100  # Flush aggregates to DB every N events
+FALLBACK_EVIDENCE_INTERVAL = int(os.getenv('FALLBACK_EVIDENCE_INTERVAL', '25'))
 
 
 # Define schema for incoming Kafka events
@@ -76,10 +89,12 @@ class StreamProcessor:
                 .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.postgresql:postgresql:42.6.0") \
                 .config("spark.sql.streaming.schemaInference", "true") \
                 .config("spark.sql.streaming.checkpointLocation", CHECKPOINT_DIR) \
-                .config("spark.sql.adaptive.enabled", "true") \
                 .getOrCreate()
 
-            self.spark.sparkContext.setLogLevel("WARN")
+            self.spark.sparkContext.setLogLevel("ERROR")
+            # Suppress verbose Spark warnings
+            logging.getLogger('org.apache.spark.sql.streaming').setLevel(logging.ERROR)
+            logging.getLogger('org.apache.kafka.common.config').setLevel(logging.ERROR)
             logger.info("Spark session initialized successfully")
 
             # Setup PostgreSQL connection properties
@@ -189,9 +204,102 @@ class StreamProcessor:
             lit(int(datetime.utcnow().timestamp()))
         )
 
+    def log_raw_event_evidence(self, batch_df: DataFrame, batch_id: int, table_name: str) -> int:
+        """Log a short proof point that Kafka events are being consumed."""
+        record_count = batch_df.count()
+        if record_count == 0:
+            logger.info(f"STREAM: batch={batch_id} no new Kafka events")
+            return record_count
+
+        type_counts = [
+            f"{row.event_type}={row['count']}"
+            for row in batch_df.groupBy("event_type").count().orderBy("event_type").collect()
+        ]
+        logger.info(
+            f"STREAM: received {record_count} Kafka events "
+            f"(batch={batch_id}, {', '.join(type_counts)})"
+        )
+        return record_count
+
+    def log_metric_evidence(self, batch_df: DataFrame, batch_id: int, table_name: str) -> int:
+        """Log a short proof point that streaming aggregation is running."""
+        record_count = batch_df.count()
+        if record_count == 0:
+            logger.info(f"STREAM: processed batch={batch_id} no completed windows yet")
+            return record_count
+
+        totals = batch_df.agg(
+            spark_sum("view_count").alias("views"),
+            spark_sum("cart_count").alias("carts"),
+            spark_sum("purchase_count").alias("purchases"),
+            spark_sum("total_events").alias("events"),
+        ).first()
+        alert_count = batch_df.filter(col("flash_sale_suggested") == True).count()
+        logger.info(
+            f"STREAM: processed batch={batch_id} windows={record_count} "
+            f"events={totals.events} views={totals.views} carts={totals.carts} "
+            f"purchases={totals.purchases} alerts={alert_count} "
+            f"-> PostgreSQL table '{table_name}'"
+        )
+        return record_count
+
+    def write_flash_sale_alerts(self, df: DataFrame) -> None:
+        """
+        Write ONLY Flash Sale alerts to console in formatted TABLE with recommendation
+        """
+        try:
+            # Filter only products that trigger flash sale alert
+            alerts_df = df.filter(col("flash_sale_suggested") == True).select(
+                col("window.start").alias("window_start"),
+                col("product_id"),
+                col("view_count"),
+                col("purchase_count"),
+                col("conversion_rate")
+            )
+
+            def log_flash_sale_table(batch_df: DataFrame, batch_id: int):
+                """Log flash sale alerts as formatted table"""
+                if batch_df.count() > 0:
+                    rows = batch_df.collect()
+                    
+                    logger.info("")
+                    logger.info("="*110)
+                    logger.info("🔥 FLASH SALE ALERTS - HIGH INTEREST + LOW CONVERSION")
+                    logger.info("="*110)
+                    logger.info(
+                        f"{'Window Start':<20} | {'Product':<8} | {'Views':<8} | {'Purchases':<12} | "
+                        f"{'Conversion%':<13} | {'Recommendation':<25}"
+                    )
+                    logger.info("-"*110)
+                    
+                    for row in rows:
+                        window_str = row.window_start.strftime('%Y-%m-%d %H:%M:%S')
+                        recommendation = "✅ YES - APPLY FLASH SALE"
+                        logger.info(
+                            f"{window_str:<20} | {row.product_id:<8} | {row.view_count:<8} | "
+                            f"{row.purchase_count:<12} | {row.conversion_rate:<13.2f}% | {recommendation:<25}"
+                        )
+                    
+                    logger.info("="*110)
+                    logger.info("")
+
+            query = alerts_df \
+                .writeStream \
+                .foreachBatch(log_flash_sale_table) \
+                .trigger(processingTime="1 minute") \
+                .option("checkpointLocation", f"{CHECKPOINT_DIR}/flash_sale_alerts") \
+                .start()
+
+            logger.info("Flash Sale alert stream started - TABLE FORMAT")
+            return query
+
+        except Exception as e:
+            logger.error(f"Failed to write Flash Sale alerts: {e}")
+            raise
+
     def write_to_console(self, df: DataFrame, mode: str = "complete") -> None:
         """
-        Write output to console for debugging and monitoring
+        Write aggregated metrics to console (all products) for debugging
         """
         try:
             query = df \
@@ -202,7 +310,7 @@ class StreamProcessor:
                 .option("truncate", "false") \
                 .option("numRows", 50) \
                 .outputMode(mode) \
-                .trigger(processingTime="30 seconds") \
+                .trigger(processingTime="1 minute") \
                 .option("checkpointLocation", f"{CHECKPOINT_DIR}/console") \
                 .start()
 
@@ -232,6 +340,7 @@ class StreamProcessor:
             )
 
             def write_to_jdbc(batch_df: DataFrame, batch_id: int):
+                row_count = self.log_metric_evidence(batch_df, batch_id, table_name)
                 batch_df.write \
                     .format("jdbc") \
                     .option("url", self.jdbc_url) \
@@ -241,6 +350,8 @@ class StreamProcessor:
                     .option("driver", "org.postgresql.Driver") \
                     .mode(mode) \
                     .save()
+                if row_count > 0:
+                    logger.info(f"STREAM: saved batch={batch_id} rows={row_count} to '{table_name}'")
 
             query = output_df \
                 .writeStream \
@@ -273,6 +384,7 @@ class StreamProcessor:
             )
 
             def write_to_jdbc(batch_df: DataFrame, batch_id: int):
+                row_count = self.log_raw_event_evidence(batch_df, batch_id, table_name)
                 batch_df.write \
                     .format("jdbc") \
                     .option("url", self.jdbc_url) \
@@ -282,6 +394,8 @@ class StreamProcessor:
                     .option("driver", "org.postgresql.Driver") \
                     .mode("append") \
                     .save()
+                if row_count > 0:
+                    logger.info(f"STREAM: saved batch={batch_id} rows={row_count} to '{table_name}'")
 
             query = output_df \
                 .writeStream \
@@ -302,11 +416,11 @@ class StreamProcessor:
         Main execution pipeline
         """
         try:
-            logger.info("=" * 80)
+            logger.info("="*80)
             logger.info("Starting PySpark Clickstream Stream Processor")
             logger.info(f"Configuration: Window={WINDOW_DURATION}, Slide={SLIDING_INTERVAL}, Watermark={WATERMARK_DELAY}")
             logger.info(f"Flash Sale Trigger: Views > {FLASH_SALE_VIEW_THRESHOLD} AND Purchases < {FLASH_SALE_PURCHASE_THRESHOLD}")
-            logger.info("=" * 80)
+            logger.info("="*80)
 
             # Read from Kafka
             df = self.read_kafka_stream()
@@ -320,8 +434,8 @@ class StreamProcessor:
             # Add metadata
             output_df = self.add_metadata(flash_sale_df)
 
-            # Write to console and PostgreSQL
-            console_query = self.write_to_console(output_df)
+            # Write to console, alerts, and PostgreSQL
+            flash_sale_query = self.write_flash_sale_alerts(output_df)
             raw_events_query = self.write_raw_events_to_postgresql(df)
             db_query = self.write_to_postgresql(output_df)
 
@@ -352,6 +466,11 @@ class PythonFallbackProcessor:
     def __init__(self):
         self.consumer = None
         self.connection = None
+        # Running aggregates: {(product_id, window_start): {view: count, cart: count, purchase: count}}
+        self.running_aggregates = {}
+        self.event_count = 0
+        self.processed_offsets = set()  # For idempotency tracking
+        self.last_event_summary = None
 
     def connect(self) -> None:
         self.connection = psycopg2.connect(
@@ -372,79 +491,185 @@ class PythonFallbackProcessor:
         )
         logger.info("Python fallback processor connected to Kafka and PostgreSQL")
 
-    def process_event(self, event: dict) -> None:
+    def log_event_evidence(self, event: dict, offset: int, window_start: datetime, window_end: datetime) -> None:
+        """Log compact evidence that the fallback consumer is actively processing Kafka events."""
+        if self.event_count <= 3 or self.event_count % FALLBACK_EVIDENCE_INTERVAL == 0:
+            logger.info(
+                f"STREAM: consumed event={self.event_count} offset={offset} "
+                f"product={event['product_id']} type={event['event_type']} "
+                f"-> PostgreSQL table 'clickstream_events'"
+            )
+
+    def process_event(self, event: dict, offset: int) -> None:
+        """Process a single event and accumulate metrics."""
+        # Idempotency check
+        if offset in self.processed_offsets:
+            logger.debug(f"Skipping already-processed offset {offset}")
+            return
+        
+        # Parse event timestamp
         event_time = datetime.fromisoformat(event["timestamp"].replace("Z", "+00:00")).replace(tzinfo=None)
-        window_start = event_time.replace(second=0, microsecond=0)
-        window_end = window_start + timedelta(minutes=1)
+        
+        # Calculate 10-minute window bucket (FIX #1)
+        minute_bucket = (event_time.minute // WINDOW_DURATION_MINUTES) * WINDOW_DURATION_MINUTES
+        window_start = event_time.replace(minute=minute_bucket, second=0, microsecond=0)
+        window_end = window_start + timedelta(minutes=WINDOW_DURATION_MINUTES)
+        
+        # Insert raw event (immediate write)
+        try:
+            with self.connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO clickstream_events
+                    (user_id, product_id, event_type, event_timestamp, session_id, device, kafka_timestamp)
+                    VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP);
+                    """,
+                    (
+                        event["user_id"],
+                        event["product_id"],
+                        event["event_type"],
+                        event_time,
+                        event.get("session_id"),
+                        event.get("device"),
+                    ),
+                )
+            self.connection.commit()
+        except Exception as e:
+            logger.error(f"Failed to insert raw event: {e}")
+            self.connection.rollback()
+            return
+        
+        # Accumulate metrics in memory (FIX #2)
+        agg_key = (event["product_id"], window_start)
+        if agg_key not in self.running_aggregates:
+            self.running_aggregates[agg_key] = {
+                "view": 0,
+                "cart": 0,
+                "purchase": 0,
+                "window_end": window_end,
+            }
+        
+        # Increment appropriate counter
+        if event["event_type"] == "view":
+            self.running_aggregates[agg_key]["view"] += 1
+        elif event["event_type"] == "add_to_cart":
+            self.running_aggregates[agg_key]["cart"] += 1
+        elif event["event_type"] == "purchase":
+            self.running_aggregates[agg_key]["purchase"] += 1
 
-        view_count = 1 if event["event_type"] == "view" else 0
-        cart_count = 1 if event["event_type"] == "add_to_cart" else 0
-        purchase_count = 1 if event["event_type"] == "purchase" else 0
+        self.event_count += 1
+        self.processed_offsets.add(offset)
+        self.last_event_summary = {
+            "offset": offset,
+            "product_id": event["product_id"],
+            "event_type": event["event_type"],
+            "window_start": window_start,
+            "window_end": window_end,
+        }
+        self.log_event_evidence(event, offset, window_start, window_end)
 
-        with self.connection.cursor() as cursor:
-            cursor.execute(
-                """
-                INSERT INTO clickstream_events
-                (user_id, product_id, event_type, event_timestamp, session_id, device, kafka_timestamp)
-                VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP);
-                """,
-                (
-                    event["user_id"],
-                    event["product_id"],
-                    event["event_type"],
-                    event_time,
-                    event.get("session_id"),
-                    event.get("device"),
-                ),
+        # Flush to DB periodically
+        if self.event_count % FALLBACK_FLUSH_BATCH_SIZE == 0:
+            self.flush_aggregates()
+    
+    def flush_aggregates(self) -> None:
+        """Flush accumulated metrics to PostgreSQL."""
+        if not self.running_aggregates:
+            return
+        
+        try:
+            with self.connection.cursor() as cursor:
+                for (product_id, window_start), agg in self.running_aggregates.items():
+                    view_count = agg["view"]
+                    cart_count = agg["cart"]
+                    purchase_count = agg["purchase"]
+                    total_events = view_count + cart_count + purchase_count
+                    window_end = agg["window_end"]
+                    
+                    # Calculate conversion rate per window (FIX #2)
+                    conversion_rate = 0.0
+                    if view_count > 0:
+                        conversion_rate = (purchase_count * 100.0) / view_count
+                    
+                    # Check flash sale trigger
+                    flash_sale_suggested = (view_count > FLASH_SALE_VIEW_THRESHOLD and
+                                           purchase_count < FLASH_SALE_PURCHASE_THRESHOLD)
+
+                    # UPSERT metrics
+                    cursor.execute(
+                        """
+                        INSERT INTO product_metrics
+                        (product_id, window_start, window_end, view_count, cart_count, purchase_count,
+                         total_events, conversion_rate, flash_sale_suggested, processed_timestamp)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                        ON CONFLICT (product_id, window_start, window_end) DO UPDATE SET
+                            view_count = product_metrics.view_count + EXCLUDED.view_count,
+                            cart_count = product_metrics.cart_count + EXCLUDED.cart_count,
+                            purchase_count = product_metrics.purchase_count + EXCLUDED.purchase_count,
+                            total_events = product_metrics.total_events + EXCLUDED.total_events,
+                            conversion_rate = CASE
+                                WHEN (product_metrics.view_count + EXCLUDED.view_count) > 0
+                                THEN ((product_metrics.purchase_count + EXCLUDED.purchase_count) * 100.0)
+                                     / (product_metrics.view_count + EXCLUDED.view_count)
+                                ELSE 0
+                            END,
+                            flash_sale_suggested =
+                                ((product_metrics.view_count + EXCLUDED.view_count) > %s)
+                                AND ((product_metrics.purchase_count + EXCLUDED.purchase_count) < %s),
+                            processed_timestamp = CURRENT_TIMESTAMP;
+                        """,
+                        (
+                            product_id,
+                            window_start,
+                            window_end,
+                            view_count,
+                            cart_count,
+                            purchase_count,
+                            total_events,
+                            conversion_rate,
+                            flash_sale_suggested,
+                            FLASH_SALE_VIEW_THRESHOLD,
+                            FLASH_SALE_PURCHASE_THRESHOLD,
+                        ),
+                    )
+
+            self.connection.commit()
+            logger.info(
+                f"STREAM: saved windows={len(self.running_aggregates)} "
+                "to PostgreSQL table 'product_metrics'"
             )
-            cursor.execute(
-                """
-                INSERT INTO product_metrics
-                (product_id, window_start, window_end, view_count, cart_count, purchase_count,
-                 total_events, conversion_rate, flash_sale_suggested, processed_timestamp)
-                VALUES (%s, %s, %s, %s, %s, %s, 1, %s, FALSE, CURRENT_TIMESTAMP)
-                ON CONFLICT (product_id, window_start, window_end) DO UPDATE SET
-                    view_count = product_metrics.view_count + EXCLUDED.view_count,
-                    cart_count = product_metrics.cart_count + EXCLUDED.cart_count,
-                    purchase_count = product_metrics.purchase_count + EXCLUDED.purchase_count,
-                    total_events = product_metrics.total_events + 1,
-                    conversion_rate = CASE
-                        WHEN product_metrics.view_count + EXCLUDED.view_count > 0
-                        THEN ((product_metrics.purchase_count + EXCLUDED.purchase_count) * 100.0)
-                             / (product_metrics.view_count + EXCLUDED.view_count)
-                        ELSE 0
-                    END,
-                    flash_sale_suggested =
-                        (product_metrics.view_count + EXCLUDED.view_count > %s)
-                        AND (product_metrics.purchase_count + EXCLUDED.purchase_count < %s),
-                    processed_timestamp = CURRENT_TIMESTAMP;
-                """,
-                (
-                    event["product_id"],
-                    window_start,
-                    window_end,
-                    view_count,
-                    cart_count,
-                    purchase_count,
-                    (purchase_count * 100.0 / view_count) if view_count else 0.0,
-                    FLASH_SALE_VIEW_THRESHOLD,
-                    FLASH_SALE_PURCHASE_THRESHOLD,
-                ),
-            )
-        self.connection.commit()
+            self.running_aggregates.clear()
+        
+        except Exception as e:
+            logger.error(f"Failed to flush aggregates: {e}")
+            self.connection.rollback()
 
     def run(self) -> None:
         self.connect()
         logger.info("Starting Python fallback stream processor")
+        logger.info(f"Configuration: Window={WINDOW_DURATION_MINUTES} min, Flush batch size={FALLBACK_FLUSH_BATCH_SIZE}")
         while True:
             try:
                 for message in self.consumer:
-                    self.process_event(message.value)
+                    self.process_event(message.value, message.offset)
+                
+                # Periodic flush even if batch not full
+                if self.running_aggregates:
+                    self.flush_aggregates()
+            
             except Exception as e:
                 logger.error(f"Python fallback processor error: {e}")
                 if self.connection:
                     self.connection.rollback()
                 time.sleep(5)
+            
+            finally:
+                # Final flush on shutdown
+                if self.running_aggregates:
+                    try:
+                        self.flush_aggregates()
+                    except Exception as e:
+                        logger.error(f"Error during final flush: {e}")
 
 
 def main():

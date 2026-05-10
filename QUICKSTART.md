@@ -78,6 +78,8 @@ docker exec -it postgres-db psql -U airflow -d clickstream_db -c \
 - Performs 10-minute sliding windows
 - Detects: Views > 100 AND Purchases < 5 → Flash Sale signal
 - Writes metrics to PostgreSQL
+- Shows readable `STREAM:` logs:
+  `docker logs -f --tail 100 stream-processor 2>&1`
 
 ### Airflow DAG (clickstream_daily_batch)
 - Runs daily at 11 PM UTC

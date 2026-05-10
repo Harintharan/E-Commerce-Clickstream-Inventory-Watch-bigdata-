@@ -20,23 +20,30 @@ from kafka.errors import KafkaError
 log_level = os.getenv('LOG_LEVEL', 'INFO')
 logging.basicConfig(
     level=getattr(logging, log_level),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s [%(levelname)-8s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+
+# Suppress verbose Kafka library logs
+logging.getLogger('kafka').setLevel(logging.WARNING)
+logging.getLogger('kafka.producer').setLevel(logging.WARNING)
+logging.getLogger('kafka.conn').setLevel(logging.WARNING)
+logging.getLogger('kafka.protocol').setLevel(logging.WARNING)
 
 # Configuration
 KAFKA_BOOTSTRAP_SERVERS = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'kafka:29092').split(',')
 KAFKA_TOPIC = os.getenv('KAFKA_TOPIC', 'clickstream_topic')
-BATCH_SIZE = int(os.getenv('BATCH_SIZE', '10'))
-BATCH_INTERVAL_SECONDS = int(os.getenv('BATCH_INTERVAL_SECONDS', '5'))
+BATCH_SIZE = int(os.getenv('BATCH_SIZE', '500'))  # 5x more data per batch
+BATCH_INTERVAL_SECONDS = float(os.getenv('BATCH_INTERVAL_SECONDS', '0.1'))  # 10x faster: every 100ms
 
 # Product and user configuration
-NUM_PRODUCTS = 50
-NUM_USERS = 100
+NUM_PRODUCTS = 15  # Product IDs from 1 to 15
+NUM_USERS = 50    # Reduced from 100 for cleaner data
 EVENT_TYPES = ['view', 'add_to_cart', 'purchase']
 
 # Anomaly configuration - Flash Sale trigger threshold
-ANOMALY_PRODUCTS = set(random.sample(range(1, NUM_PRODUCTS + 1), k=5))
+ANOMALY_PRODUCTS = set(random.sample(range(1, NUM_PRODUCTS + 1), k=3))  # 3 anomaly products from 15 total
 ANOMALY_VIEW_THRESHOLD = 100
 ANOMALY_PURCHASE_THRESHOLD = 5
 
@@ -57,7 +64,7 @@ class ClickstreamProducer:
 
         for attempt in range(retry_attempts):
             try:
-                logger.info(f"Attempting to connect to Kafka (attempt {attempt + 1}/{retry_attempts})")
+                logger.info(f"Connecting to Kafka (attempt {attempt + 1}/{retry_attempts})...")
                 self.producer = KafkaProducer(
                     bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
                     value_serializer=lambda v: json.dumps(v).encode('utf-8'),
@@ -65,24 +72,29 @@ class ClickstreamProducer:
                     retries=3,
                     max_in_flight_requests_per_connection=1,
                 )
-                logger.info(f"Successfully connected to Kafka brokers: {KAFKA_BOOTSTRAP_SERVERS}")
+                logger.info(f"✓ Connected to Kafka: {', '.join(KAFKA_BOOTSTRAP_SERVERS)}")
                 break
             except Exception as e:
-                logger.error(f"Failed to connect to Kafka: {e}")
+                logger.warning(f"Connection failed: {e}")
                 if attempt < retry_attempts - 1:
-                    logger.info(f"Retrying in {retry_delay} seconds...")
+                    logger.info(f"Retrying in {retry_delay}s...")
                     time.sleep(retry_delay)
                 else:
-                    logger.error("Failed to connect to Kafka after all attempts")
+                    logger.error("Failed to connect to Kafka after all retry attempts")
                     raise
 
     def generate_event(self) -> Dict[str, Any]:
         """
         Generate a single clickstream event
-        With probability, generates anomalous patterns
+        With probability, generates anomalous patterns on specific products
         """
         user_id = random.randint(1, NUM_USERS)
-        product_id = random.randint(1, NUM_PRODUCTS)
+        
+        # Bias: 80% chance to pick anomaly product, 20% normal product (EXTREME for fast demo)
+        if random.random() < 0.80:
+            product_id = random.choice(list(ANOMALY_PRODUCTS))
+        else:
+            product_id = random.randint(1, NUM_PRODUCTS)
 
         # Decide event type based on probability distribution
         event_probabilities = [0.70, 0.20, 0.10]  # view, add_to_cart, purchase
@@ -90,8 +102,8 @@ class ClickstreamProducer:
 
         # Generate anomalous pattern for specific products
         # These products will have high views but low purchases to trigger Flash Sale
-        if product_id in ANOMALY_PRODUCTS and random.random() < 0.85:
-            if random.random() < 0.95:
+        if product_id in ANOMALY_PRODUCTS and random.random() < 0.95:
+            if random.random() < 0.99:  # 99% views for anomaly products
                 event_type = 'view'  # High view rate
             else:
                 event_type = random.choice(['add_to_cart', 'purchase'])
@@ -115,22 +127,20 @@ class ClickstreamProducer:
             future = self.producer.send(KAFKA_TOPIC, value=event)
             record_metadata = future.get(timeout=10)
 
-            logger.debug(
-                f"Event sent: user_id={event['user_id']}, "
-                f"product_id={event['product_id']}, "
-                f"type={event['event_type']}, "
-                f"partition={record_metadata.partition}, "
-                f"offset={record_metadata.offset}"
-            )
             self.event_counter += 1
-
-            if self.event_counter % 100 == 0:
-                logger.info(f"Total events sent: {self.event_counter}")
+            
+            # Log only essential data
+            logger.info(
+                f"user_id: {event['user_id']:3d} | "
+                f"product_id: {event['product_id']:2d} | "
+                f"event_type: {event['event_type']:12s} | "
+                f"timestamp: {event['timestamp']}"
+            )
 
         except KafkaError as e:
-            logger.error(f"Kafka error while sending event: {e}")
+            logger.error(f"✗ Kafka error: {e}")
         except Exception as e:
-            logger.error(f"Unexpected error while sending event: {e}")
+            logger.error(f"✗ Unexpected error: {e}")
 
     def send_batch(self, batch_size: int = BATCH_SIZE) -> None:
         """Generate and send a batch of events"""
@@ -144,18 +154,23 @@ class ClickstreamProducer:
 
     def run(self) -> None:
         """Main loop to continuously generate and send events"""
-        logger.info(f"Starting Clickstream Producer")
-        logger.info(f"Anomaly Products (Flash Sale candidates): {sorted(ANOMALY_PRODUCTS)}")
-        logger.info(f"Batch size: {BATCH_SIZE}, Interval: {BATCH_INTERVAL_SECONDS}s")
+        logger.info("=" * 80)
+        logger.info("CLICKSTREAM EVENT PRODUCER STARTED")
+        logger.info("=" * 80)
+        logger.info(f"Anomaly Products: {sorted(ANOMALY_PRODUCTS)}")
+        logger.info("=" * 80)
 
         try:
             while True:
                 self.send_batch()
                 time.sleep(BATCH_INTERVAL_SECONDS)
         except KeyboardInterrupt:
-            logger.info("Received interrupt signal, shutting down...")
+            logger.info("\n" + "=" * 80)
+            logger.info("PRODUCER STOPPED")
+            logger.info(f"Total events sent: {self.event_counter}")
+            logger.info("=" * 80)
         except Exception as e:
-            logger.error(f"Unexpected error in main loop: {e}")
+            logger.error(f"Error: {e}")
         finally:
             self.shutdown()
 

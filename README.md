@@ -205,7 +205,7 @@ environment:
 - [ ] Producer sending events: `docker logs python-producer`
 - [ ] Kafka topic has messages: kafka-console-consumer
 - [ ] PostgreSQL tables populated: `SELECT COUNT(*) FROM product_metrics;`
-- [ ] PySpark processing: `docker logs stream-processor | grep "Flash Sale"`
+- [ ] Stream processing evidence: `docker logs stream-processor 2>&1 | grep "STREAM:"`
 - [ ] Airflow DAG visible in UI: `http://localhost:8080`
 
 ## Monitoring & Debugging
@@ -217,8 +217,11 @@ docker logs python-producer --follow
 
 ### Check Stream Processor Logs
 ```bash
-docker logs stream-processor --follow
+docker logs -f --tail 100 stream-processor 2>&1
 ```
+
+Look for simple `STREAM:` lines. They show Kafka batches being consumed,
+window metrics being processed, and PostgreSQL writes completing.
 
 ### Monitor Kafka Broker
 ```bash

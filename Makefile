@@ -64,7 +64,7 @@ logs-producer:
 	docker-compose logs -f python-producer
 
 logs-processor:
-	docker-compose logs -f stream-processor
+	docker logs -f --tail 100 stream-processor 2>&1
 
 logs-kafka:
 	docker-compose logs -f kafka
