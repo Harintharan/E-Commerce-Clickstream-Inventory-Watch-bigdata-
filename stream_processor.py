@@ -7,9 +7,12 @@ Performs sliding window aggregation and Flash Sale detection
 import json
 import logging
 import os
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 from typing import Optional
 
+import psycopg2
+from kafka import KafkaConsumer
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql.functions import (
     col, from_json, window, count, when, sum as spark_sum,
@@ -343,10 +346,116 @@ class StreamProcessor:
             logger.error(f"Error during shutdown: {e}")
 
 
+class PythonFallbackProcessor:
+    """Kafka/PostgreSQL processor used when Spark connector JARs are unavailable."""
+
+    def __init__(self):
+        self.consumer = None
+        self.connection = None
+
+    def connect(self) -> None:
+        self.connection = psycopg2.connect(
+            host=DB_HOST,
+            port=DB_PORT,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            database=DB_NAME,
+            connect_timeout=10,
+        )
+        self.consumer = KafkaConsumer(
+            KAFKA_TOPIC,
+            bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+            value_deserializer=lambda value: json.loads(value.decode("utf-8")),
+            auto_offset_reset="latest",
+            enable_auto_commit=True,
+            group_id="python_fallback_stream_processor",
+        )
+        logger.info("Python fallback processor connected to Kafka and PostgreSQL")
+
+    def process_event(self, event: dict) -> None:
+        event_time = datetime.fromisoformat(event["timestamp"].replace("Z", "+00:00")).replace(tzinfo=None)
+        window_start = event_time.replace(second=0, microsecond=0)
+        window_end = window_start + timedelta(minutes=1)
+
+        view_count = 1 if event["event_type"] == "view" else 0
+        cart_count = 1 if event["event_type"] == "add_to_cart" else 0
+        purchase_count = 1 if event["event_type"] == "purchase" else 0
+
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO clickstream_events
+                (user_id, product_id, event_type, event_timestamp, session_id, device, kafka_timestamp)
+                VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP);
+                """,
+                (
+                    event["user_id"],
+                    event["product_id"],
+                    event["event_type"],
+                    event_time,
+                    event.get("session_id"),
+                    event.get("device"),
+                ),
+            )
+            cursor.execute(
+                """
+                INSERT INTO product_metrics
+                (product_id, window_start, window_end, view_count, cart_count, purchase_count,
+                 total_events, conversion_rate, flash_sale_suggested, processed_timestamp)
+                VALUES (%s, %s, %s, %s, %s, %s, 1, %s, FALSE, CURRENT_TIMESTAMP)
+                ON CONFLICT (product_id, window_start, window_end) DO UPDATE SET
+                    view_count = product_metrics.view_count + EXCLUDED.view_count,
+                    cart_count = product_metrics.cart_count + EXCLUDED.cart_count,
+                    purchase_count = product_metrics.purchase_count + EXCLUDED.purchase_count,
+                    total_events = product_metrics.total_events + 1,
+                    conversion_rate = CASE
+                        WHEN product_metrics.view_count + EXCLUDED.view_count > 0
+                        THEN ((product_metrics.purchase_count + EXCLUDED.purchase_count) * 100.0)
+                             / (product_metrics.view_count + EXCLUDED.view_count)
+                        ELSE 0
+                    END,
+                    flash_sale_suggested =
+                        (product_metrics.view_count + EXCLUDED.view_count > %s)
+                        AND (product_metrics.purchase_count + EXCLUDED.purchase_count < %s),
+                    processed_timestamp = CURRENT_TIMESTAMP;
+                """,
+                (
+                    event["product_id"],
+                    window_start,
+                    window_end,
+                    view_count,
+                    cart_count,
+                    purchase_count,
+                    (purchase_count * 100.0 / view_count) if view_count else 0.0,
+                    FLASH_SALE_VIEW_THRESHOLD,
+                    FLASH_SALE_PURCHASE_THRESHOLD,
+                ),
+            )
+        self.connection.commit()
+
+    def run(self) -> None:
+        self.connect()
+        logger.info("Starting Python fallback stream processor")
+        while True:
+            try:
+                for message in self.consumer:
+                    self.process_event(message.value)
+            except Exception as e:
+                logger.error(f"Python fallback processor error: {e}")
+                if self.connection:
+                    self.connection.rollback()
+                time.sleep(5)
+
+
 def main():
     """Entry point"""
-    processor = StreamProcessor()
-    processor.run()
+    try:
+        processor = StreamProcessor()
+        processor.run()
+    except Exception as e:
+        logger.warning(f"Spark processor unavailable, falling back to Python processor: {e}")
+        fallback = PythonFallbackProcessor()
+        fallback.run()
 
 
 if __name__ == '__main__':

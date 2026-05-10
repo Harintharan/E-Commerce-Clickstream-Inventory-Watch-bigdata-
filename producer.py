@@ -52,8 +52,8 @@ class ClickstreamProducer:
 
     def _initialize_producer(self) -> None:
         """Initialize Kafka producer with retry logic"""
-        retry_attempts = 5
-        retry_delay = 2
+        retry_attempts = int(os.getenv('KAFKA_CONNECT_RETRY_ATTEMPTS', '30'))
+        retry_delay = int(os.getenv('KAFKA_CONNECT_RETRY_DELAY', '5'))
 
         for attempt in range(retry_attempts):
             try:

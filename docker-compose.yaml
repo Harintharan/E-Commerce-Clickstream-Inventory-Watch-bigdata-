@@ -32,6 +32,12 @@ services:
       - big_data_network
     ports:
       - "9092:9092"
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
 
   # PostgreSQL Database
   postgres-db:
@@ -104,16 +110,16 @@ services:
       - "18080:8080"
     command: >
       bash -c "
-      airflow db init &&
+      airflow db migrate &&
       airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com || true &&
-      airflow webserver
+      airflow webserver --workers 1 --worker-timeout 300
       "
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 30s
+      start_period: 120s
 
   # Airflow Scheduler
   airflow-scheduler:
@@ -146,7 +152,11 @@ services:
       - ./plugins:/airflow/plugins
     networks:
       - big_data_network
-    command: airflow scheduler
+    command: >
+      bash -c "
+      airflow db migrate &&
+      airflow scheduler
+      "
     restart: on-failure
 
   # Note: Spark is installed via PySpark pip package in stream-processor
@@ -161,7 +171,7 @@ services:
     container_name: python-producer
     depends_on:
       kafka:
-        condition: service_started
+        condition: service_healthy
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       KAFKA_TOPIC: clickstream_topic
@@ -182,7 +192,7 @@ services:
     container_name: stream-processor
     depends_on:
       kafka:
-        condition: service_started
+        condition: service_healthy
       postgres-db:
         condition: service_healthy
     environment:
