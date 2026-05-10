@@ -17,6 +17,9 @@ from pyspark.sql.functions import (
 )
 from pyspark.sql.types import StructType, StructField, StringType, IntegerType, LongType
 
+import pandas as pd
+from sqlalchemy import create_engine
+
 
 # Configure logging
 log_level = os.getenv('LOG_LEVEL', 'INFO')
@@ -212,7 +215,7 @@ class StreamProcessor:
 
     def write_to_postgresql(self, df: DataFrame, table_name: str = "product_metrics", mode: str = "append") -> None:
         """
-        Write aggregated metrics to PostgreSQL
+        Write aggregated metrics to PostgreSQL using SQLAlchemy
         """
         try:
             output_df = df.select(
@@ -228,20 +231,31 @@ class StreamProcessor:
                 col("processed_timestamp")
             )
 
-            def write_to_jdbc(batch_df: DataFrame, batch_id: int):
-                batch_df.write \
-                    .format("jdbc") \
-                    .option("url", self.jdbc_url) \
-                    .option("dbtable", table_name) \
-                    .option("user", DB_USER) \
-                    .option("password", DB_PASSWORD) \
-                    .option("driver", "org.postgresql.Driver") \
-                    .mode(mode) \
-                    .save()
+            def write_to_db(batch_df: DataFrame, batch_id: int):
+                """Write batch to PostgreSQL using SQLAlchemy"""
+                try:
+                    if batch_df.count() == 0:
+                        logger.debug(f"Batch {batch_id}: No data to write")
+                        return
+                    
+                    # Convert to pandas
+                    pdf = batch_df.toPandas()
+                    
+                    # Create SQLAlchemy engine
+                    db_url = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+                    engine = create_engine(db_url)
+                    
+                    # Write to database
+                    pdf.to_sql(table_name, engine, if_exists=mode, index=False)
+                    logger.info(f"Batch {batch_id}: Successfully wrote {len(pdf)} records to {table_name}")
+                    
+                except Exception as e:
+                    logger.error(f"Batch {batch_id}: Failed to write to database: {e}")
+                    raise
 
             query = output_df \
                 .writeStream \
-                .foreachBatch(write_to_jdbc) \
+                .foreachBatch(write_to_db) \
                 .trigger(processingTime="30 seconds") \
                 .option("checkpointLocation", f"{CHECKPOINT_DIR}/postgres") \
                 .start()

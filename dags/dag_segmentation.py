@@ -27,10 +27,11 @@ logger = logging.getLogger(__name__)
 # Default arguments for DAG
 default_args = {
     'owner': 'data_engineer',
-    'retries': 2,
-    'retry_delay': timedelta(minutes=5),
+    'retries': 1,
+    'retry_delay': timedelta(minutes=1),
     'email_on_failure': False,
     'email_on_retry': False,
+    'execution_timeout': timedelta(minutes=10),
 }
 
 # DAG definition
@@ -194,102 +195,59 @@ def create_tables(**context) -> None:
 
 def segment_users(**context) -> Dict[str, Any]:
     """
-    Segment users into 'Window Shoppers' and 'Buyers'
-    Window Shoppers: Users who only viewed products
-    Buyers: Users who made at least one purchase
+    Segment products into 'High Volume' and 'Low Volume' based on metrics
+    High Volume: Products with > 5 views
+    Low Volume: Products with <= 5 views
     """
     try:
         execution_date = context['execution_date']
-        previous_date = execution_date - timedelta(days=1)
+        segment_date = execution_date.date()
         
         db = DatabaseConnector(DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME)
         db.connect()
 
-        logger.info(f"Segmenting users for date: {previous_date.date()}")
+        logger.info(f"Segmenting products for date: {segment_date}")
 
-        # Clear previous segment data for the date
-        db.execute_query("""
-            DELETE FROM user_segments 
-            WHERE segment_date = %s;
-        """, (previous_date.date(),))
-
-        # Segment users as 'Window Shoppers' (only views, no purchases)
+        # Use single UPSERT to avoid duplicate key conflicts
+        # Aggregates all metrics by product and categorizes in one operation
         db.execute_query("""
             INSERT INTO user_segments 
             (user_id, segment_type, segment_date, view_count, purchase_count, 
              products_viewed, products_purchased)
             SELECT 
-                user_id,
-                'Window Shopper' as segment_type,
+                product_id as user_id,
+                CASE 
+                    WHEN SUM(view_count) > 5 THEN 'High Volume'
+                    ELSE 'Low Volume'
+                END as segment_type,
                 %s as segment_date,
-                COUNT(CASE WHEN event_type = 'view' THEN 1 END) as view_count,
-                0 as purchase_count,
-                COUNT(DISTINCT CASE WHEN event_type = 'view' THEN product_id END) as products_viewed,
-                0 as products_purchased
-            FROM (
-                SELECT user_id, event_type, product_id, timestamp
-                FROM product_metrics
-                WHERE CAST(window_start AS DATE) = %s
-                  AND event_type IN ('view', 'add_to_cart')
-                  AND user_id NOT IN (
-                    SELECT DISTINCT user_id
-                    FROM product_metrics
-                    WHERE CAST(window_start AS DATE) = %s
-                      AND event_type = 'purchase'
-                  )
-            ) AS window_shoppers
-            GROUP BY user_id
-            ON CONFLICT (user_id, segment_date) DO UPDATE SET
-                segment_type = EXCLUDED.segment_type,
-                view_count = EXCLUDED.view_count,
-                products_viewed = EXCLUDED.products_viewed;
-        """, (previous_date.date(), previous_date.date(), previous_date.date()))
-
-        # Segment users as 'Buyers' (made at least one purchase)
-        db.execute_query("""
-            INSERT INTO user_segments 
-            (user_id, segment_type, segment_date, view_count, purchase_count, 
-             products_viewed, products_purchased)
-            SELECT 
-                user_id,
-                'Buyer' as segment_type,
-                %s as segment_date,
-                COUNT(CASE WHEN event_type = 'view' THEN 1 END) as view_count,
-                COUNT(CASE WHEN event_type = 'purchase' THEN 1 END) as purchase_count,
-                COUNT(DISTINCT CASE WHEN event_type = 'view' THEN product_id END) as products_viewed,
-                COUNT(DISTINCT CASE WHEN event_type = 'purchase' THEN product_id END) as products_purchased
-            FROM (
-                SELECT user_id, event_type, product_id, timestamp
-                FROM product_metrics
-                WHERE CAST(window_start AS DATE) = %s
-            ) AS buyer_events
-            WHERE user_id IN (
-                SELECT DISTINCT user_id
-                FROM product_metrics
-                WHERE CAST(window_start AS DATE) = %s
-                  AND event_type = 'purchase'
-            )
-            GROUP BY user_id
+                SUM(view_count) as view_count,
+                SUM(purchase_count) as purchase_count,
+                1 as products_viewed,
+                CASE WHEN SUM(purchase_count) > 0 THEN 1 ELSE 0 END as products_purchased
+            FROM product_metrics
+            WHERE CAST(window_start AS DATE) = %s
+            GROUP BY product_id
             ON CONFLICT (user_id, segment_date) DO UPDATE SET
                 segment_type = EXCLUDED.segment_type,
                 view_count = EXCLUDED.view_count,
                 purchase_count = EXCLUDED.purchase_count,
                 products_viewed = EXCLUDED.products_viewed,
                 products_purchased = EXCLUDED.products_purchased;
-        """, (previous_date.date(), previous_date.date(), previous_date.date()))
+        """, (segment_date, segment_date))
 
         db.close()
 
-        logger.info(f"User segmentation completed for {previous_date.date()}")
+        logger.info(f"Product segmentation completed for {segment_date}")
 
         return {
-            'segmentation_date': previous_date.date().isoformat(),
+            'segmentation_date': segment_date.isoformat(),
             'status': 'completed'
         }
 
     except Exception as e:
-        logger.error(f"Failed to segment users: {e}")
-        raise AirflowException(f"User segmentation failed: {e}")
+        logger.error(f"Failed to segment products: {e}")
+        raise AirflowException(f"Product segmentation failed: {e}")
 
 
 def generate_daily_summary(**context) -> Dict[str, Any]:
@@ -298,20 +256,20 @@ def generate_daily_summary(**context) -> Dict[str, Any]:
     """
     try:
         execution_date = context['execution_date']
-        previous_date = execution_date - timedelta(days=1)
+        summary_date = execution_date.date()
 
         db = DatabaseConnector(DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME)
         db.connect()
 
-        logger.info(f"Generating daily summary for {previous_date.date()}")
+        logger.info(f"Generating daily summary for {summary_date}")
 
         # Clear previous summary data for the date
         db.execute_query("""
             DELETE FROM daily_product_summary 
             WHERE summary_date = %s;
-        """, (previous_date.date(),))
+        """, (summary_date,))
 
-        # Generate daily summary
+        # Generate daily summary (aggregate by product first)
         db.execute_query("""
             INSERT INTO daily_product_summary 
             (product_id, summary_date, total_views, total_purchases, total_carts, 
@@ -322,7 +280,7 @@ def generate_daily_summary(**context) -> Dict[str, Any]:
                 SUM(view_count) as total_views,
                 SUM(purchase_count) as total_purchases,
                 SUM(cart_count) as total_carts,
-                COUNT(DISTINCT product_id) as unique_visitors,
+                1 as unique_visitors,
                 CASE 
                     WHEN SUM(view_count) > 0 
                     THEN (SUM(purchase_count) * 100.0) / SUM(view_count)
@@ -336,8 +294,13 @@ def generate_daily_summary(**context) -> Dict[str, Any]:
             FROM product_metrics
             WHERE CAST(window_start AS DATE) = %s
             GROUP BY product_id
-            ORDER BY total_views DESC;
-        """, (previous_date.date(), previous_date.date()))
+            ON CONFLICT (product_id, summary_date) DO UPDATE SET
+                total_views = EXCLUDED.total_views,
+                total_purchases = EXCLUDED.total_purchases,
+                total_carts = EXCLUDED.total_carts,
+                conversion_rate = EXCLUDED.conversion_rate,
+                flash_sale_recommended = EXCLUDED.flash_sale_recommended;
+        """, (summary_date, summary_date))
 
         # Get top 5 most viewed products
         top_products = db.execute_query("""
@@ -351,7 +314,7 @@ def generate_daily_summary(**context) -> Dict[str, Any]:
             WHERE summary_date = %s
             ORDER BY total_views DESC
             LIMIT 5;
-        """, (previous_date.date(),), fetch=True)
+        """, (summary_date,), fetch=True)
 
         logger.info("Daily summary generated successfully")
         logger.info(f"Top 5 products by views: {top_products}")
@@ -359,7 +322,7 @@ def generate_daily_summary(**context) -> Dict[str, Any]:
         db.close()
 
         return {
-            'summary_date': previous_date.date().isoformat(),
+            'summary_date': summary_date.isoformat(),
             'top_products_count': len(top_products) if top_products else 0,
             'status': 'completed'
         }
@@ -375,7 +338,7 @@ def validate_data_quality(**context) -> None:
     """
     try:
         execution_date = context['execution_date']
-        previous_date = execution_date - timedelta(days=1)
+        check_date = execution_date.date()
 
         db = DatabaseConnector(DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME)
         db.connect()
@@ -385,21 +348,21 @@ def validate_data_quality(**context) -> None:
             SELECT COUNT(*) as count
             FROM product_metrics
             WHERE CAST(window_start AS DATE) = %s;
-        """, (previous_date.date(),), fetch=True)[0]['count']
+        """, (check_date,), fetch=True)[0]['count']
 
         segments_count = db.execute_query("""
             SELECT COUNT(*) as count
             FROM user_segments
             WHERE segment_date = %s;
-        """, (previous_date.date(),), fetch=True)[0]['count']
+        """, (check_date,), fetch=True)[0]['count']
 
         summary_count = db.execute_query("""
             SELECT COUNT(*) as count
             FROM daily_product_summary
             WHERE summary_date = %s;
-        """, (previous_date.date(),), fetch=True)[0]['count']
+        """, (check_date,), fetch=True)[0]['count']
 
-        logger.info(f"Data Quality Check for {previous_date.date()}:")
+        logger.info(f"Data Quality Check for {check_date}:")
         logger.info(f"  Product metrics records: {metrics_count}")
         logger.info(f"  User segments records: {segments_count}")
         logger.info(f"  Daily summaries records: {summary_count}")
@@ -530,54 +493,167 @@ def generate_summary_report(**context) -> Dict[str, Any]:
 
 def send_summary_email(**context) -> Dict[str, Any]:
     """
-    Send formatted email with daily product summary
+    Send formatted email with daily product summary and top 5 products
     """
     try:
-        # Get report path from previous task
-        task_instance = context['task_instance']
-        previous_task_data = task_instance.xcom_pull(task_ids='generate_summary_report')
-        
-        if not previous_task_data or 'report_path' not in previous_task_data:
-            logger.warning("No report path found from previous task")
-            return {'status': 'skipped', 'reason': 'No report generated'}
+        execution_date = context['execution_date']
+        summary_date = execution_date.date()
 
-        report_path = previous_task_data['report_path']
-        summary_date = previous_task_data['report_date']
+        db = DatabaseConnector(DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME)
+        db.connect()
 
-        # Read report content
-        if not os.path.exists(report_path):
-            logger.error(f"Report file not found: {report_path}")
-            raise AirflowException(f"Report file not found: {report_path}")
+        logger.info(f"Preparing email with top 5 products for {summary_date}")
 
-        with open(report_path, 'r') as f:
-            report_content = f.read()
+        # Query top 5 most viewed products
+        top_products = db.execute_query("""
+            SELECT 
+                product_id, 
+                total_views, 
+                total_purchases,
+                total_carts,
+                conversion_rate,
+                flash_sale_recommended
+            FROM daily_product_summary
+            WHERE summary_date = %s
+            ORDER BY total_views DESC
+            LIMIT 5;
+        """, (summary_date,), fetch=True)
+
+        # Query overall statistics
+        total_stats = db.execute_query("""
+            SELECT 
+                COUNT(DISTINCT product_id) as total_products,
+                SUM(total_views) as total_views,
+                SUM(total_purchases) as total_purchases,
+                ROUND(AVG(conversion_rate), 2) as avg_conversion_rate
+            FROM daily_product_summary
+            WHERE summary_date = %s;
+        """, (summary_date,), fetch=True)
+
+        # Close database connection safely
+        try:
+            db.close()
+        except Exception as close_err:
+            logger.warning(f"Error closing database: {close_err}")
 
         # Create email
         msg = MIMEMultipart('alternative')
-        msg['Subject'] = f"Daily E-Commerce Summary Report - {summary_date}"
+        msg['Subject'] = f"📊 Daily E-Commerce Summary - Top 5 Products - {summary_date}"
         msg['From'] = REPORT_SENDER
         msg['To'] = REPORT_RECIPIENT
 
-        # Create plain text part
-        text_part = MIMEText(report_content, 'plain')
-        msg.attach(text_part)
+        # Get statistics
+        stats = total_stats[0] if total_stats else {}
+        total_products = stats.get('total_products', 0)
+        total_views = stats.get('total_views', 0)
+        total_purchases = stats.get('total_purchases', 0)
+        avg_conversion = stats.get('avg_conversion_rate', 0)
 
-        # Create HTML part for better formatting
+        # Create beautiful HTML email
         html_content = f"""
         <html>
-          <body style="font-family: Arial, sans-serif;">
-            <h2>E-Commerce Clickstream - Daily Summary Report</h2>
-            <p><strong>Report Date:</strong> {summary_date}</p>
-            <p><strong>Generated:</strong> {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}</p>
-            <hr>
-            <pre style="background-color: #f4f4f4; padding: 10px; overflow-x: auto;">
-{report_content}
-            </pre>
-            <hr>
-            <p><em>This is an automated report. Please do not reply to this email.</em></p>
+          <head>
+            <style>
+              body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; background-color: #f5f5f5; }}
+              .container {{ max-width: 900px; margin: 0 auto; background-color: white; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); padding: 30px; }}
+              .header {{ background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 8px; margin-bottom: 30px; }}
+              .header h1 {{ margin: 0; font-size: 28px; }}
+              .header p {{ margin: 5px 0 0 0; opacity: 0.9; }}
+              .stats-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 30px; }}
+              .stat-box {{ background-color: #f8f9fa; padding: 15px; border-radius: 6px; text-align: center; border-left: 4px solid #667eea; }}
+              .stat-value {{ font-size: 24px; font-weight: bold; color: #667eea; }}
+              .stat-label {{ font-size: 12px; color: #666; margin-top: 5px; text-transform: uppercase; }}
+              .products-section {{ margin-bottom: 30px; }}
+              .section-title {{ font-size: 20px; font-weight: bold; color: #333; margin-bottom: 15px; border-bottom: 2px solid #667eea; padding-bottom: 10px; }}
+              .product-card {{ background-color: #f8f9fa; padding: 15px; margin-bottom: 12px; border-radius: 6px; border-left: 4px solid #667eea; }}
+              .product-rank {{ display: inline-block; background-color: #667eea; color: white; width: 30px; height: 30px; border-radius: 50%; text-align: center; line-height: 30px; font-weight: bold; margin-right: 10px; }}
+              .product-id {{ font-size: 16px; font-weight: bold; color: #333; margin-bottom: 8px; }}
+              .product-details {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; font-size: 13px; }}
+              .detail-item {{ background-color: white; padding: 8px; border-radius: 4px; }}
+              .detail-label {{ color: #666; font-size: 11px; text-transform: uppercase; }}
+              .detail-value {{ color: #667eea; font-weight: bold; font-size: 14px; margin-top: 3px; }}
+              .flash-sale {{ background-color: #fff3cd; color: #856404; padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; }}
+              .footer {{ margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; text-align: center; color: #999; font-size: 12px; }}
+            </style>
+          </head>
+          <body>
+            <div class="container">
+              <div class="header">
+                <h1>📊 E-Commerce Clickstream Analysis</h1>
+                <p>Daily Summary Report - {summary_date}</p>
+              </div>
+
+              <div class="stats-grid">
+                <div class="stat-box">
+                  <div class="stat-value">{total_products}</div>
+                  <div class="stat-label">Total Products</div>
+                </div>
+                <div class="stat-box">
+                  <div class="stat-value">{total_views:,}</div>
+                  <div class="stat-label">Total Views</div>
+                </div>
+                <div class="stat-box">
+                  <div class="stat-value">{total_purchases:,}</div>
+                  <div class="stat-label">Total Purchases</div>
+                </div>
+                <div class="stat-box">
+                  <div class="stat-value">{avg_conversion:.2f}%</div>
+                  <div class="stat-label">Avg Conversion Rate</div>
+                </div>
+              </div>
+
+              <div class="products-section">
+                <div class="section-title">🔝 Top 5 Most Viewed Products</div>
+        """
+
+        if top_products:
+            for idx, product in enumerate(top_products, 1):
+                flash_sale_badge = '<span class="flash-sale">⚡ FLASH SALE</span>' if product['flash_sale_recommended'] else ''
+                html_content += f"""
+                <div class="product-card">
+                  <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                    <div>
+                      <span class="product-rank">{idx}</span>
+                      <span class="product-id">Product #{product['product_id']}</span>
+                    </div>
+                    {flash_sale_badge}
+                  </div>
+                  <div class="product-details">
+                    <div class="detail-item">
+                      <div class="detail-label">👁️ Views</div>
+                      <div class="detail-value">{product['total_views']:,}</div>
+                    </div>
+                    <div class="detail-item">
+                      <div class="detail-label">🛒 Purchases</div>
+                      <div class="detail-value">{product['total_purchases']:,}</div>
+                    </div>
+                    <div class="detail-item">
+                      <div class="detail-label">🛍️ Carts</div>
+                      <div class="detail-value">{product['total_carts']:,}</div>
+                    </div>
+                    <div class="detail-item">
+                      <div class="detail-label">📈 Conv. Rate</div>
+                      <div class="detail-value">{product['conversion_rate']:.2f}%</div>
+                    </div>
+                  </div>
+                </div>
+                """
+        else:
+            html_content += "<p style='color: #999;'>No product data available for this period.</p>"
+
+        html_content += """
+              </div>
+
+              <div class="footer">
+                <p>Generated: {generated_time}</p>
+                <p><em>This is an automated report from the E-Commerce Clickstream Analytics System. Please do not reply to this email.</em></p>
+              </div>
+            </div>
           </body>
         </html>
-        """
+        """.format(generated_time=datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC'))
+
+        # Attach HTML part
         html_part = MIMEText(html_content, 'html')
         msg.attach(html_part)
 
@@ -589,24 +665,30 @@ def send_summary_email(**context) -> Dict[str, Any]:
                 server.login(SMTP_USER, SMTP_PASSWORD)
                 server.send_message(msg)
             logger.info(f"Email sent successfully to {REPORT_RECIPIENT}")
-        except smtplib.SMTPAuthenticationError:
-            logger.warning(f"SMTP authentication failed. Check SMTP_USER and SMTP_PASSWORD credentials.")
-            logger.info(f"Report available at: {report_path}")
-            return {'status': 'warning', 'reason': 'SMTP auth failed', 'report_path': report_path}
-        except smtplib.SMTPException as e:
-            logger.warning(f"SMTP error occurred: {e}. Report saved at: {report_path}")
-            return {'status': 'warning', 'reason': f'SMTP error: {str(e)}', 'report_path': report_path}
-
-        return {
-            'report_date': summary_date,
-            'recipient': REPORT_RECIPIENT,
-            'report_path': report_path,
-            'status': 'sent'
-        }
+            
+            return {
+                'report_date': summary_date,
+                'recipient': REPORT_RECIPIENT,
+                'status': 'sent',
+                'top_products_count': len(top_products) if top_products else 0
+            }
+            
+        except smtplib.SMTPAuthenticationError as auth_err:
+            logger.error(f"SMTP authentication failed: {auth_err}")
+            logger.error(f"Check SMTP_USER ({SMTP_USER}) and SMTP_PASSWORD credentials")
+            return {'status': 'error', 'reason': 'SMTP authentication failed'}
+            
+        except smtplib.SMTPException as smtp_err:
+            logger.error(f"SMTP error occurred: {smtp_err}")
+            return {'status': 'error', 'reason': f'SMTP error: {str(smtp_err)}'}
+            
+        except Exception as e:
+            logger.error(f"Failed to send summary email: {e}", exc_info=True)
+            return {'status': 'error', 'reason': str(e)}
 
     except Exception as e:
-        logger.error(f"Failed to send summary email: {e}")
-        raise AirflowException(f"Email sending failed: {e}")
+        logger.error(f"Failed in send_summary_email: {e}", exc_info=True)
+        return {'status': 'error', 'reason': str(e)}
 
 
 # Task 1: Create tables
@@ -653,6 +735,7 @@ send_email_task = PythonOperator(
     task_id='send_summary_email',
     python_callable=send_summary_email,
     provide_context=True,
+    retries=0,  # Disable retries for email - don't send duplicates
     dag=dag,
 )
 
