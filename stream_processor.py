@@ -49,11 +49,13 @@ CHECKPOINT_DIR = '/app/checkpoint'
 # Requirement: High Interest (>100 views) + Low Conversion (<5 purchases)
 FLASH_SALE_VIEW_THRESHOLD = 100  # PRODUCTION: >100 views
 FLASH_SALE_PURCHASE_THRESHOLD = 5  # PRODUCTION: <5 purchases
+
 # Window Configuration
 WINDOW_DURATION_MINUTES = 10  # Must match WINDOW_DURATION
 SLIDING_INTERVAL_MINUTES = 1   # Must match SLIDING_INTERVAL
-WINDOW_DURATION = "10 minutes"  # Production requirement
-SLIDING_INTERVAL = "1 minute"   # Check every minute
+
+WINDOW_DURATION = "10 minutes"  
+SLIDING_INTERVAL = "1 minute"  
 WATERMARK_DELAY = "30 seconds"
 # Fallback processor batch configuration
 FALLBACK_FLUSH_BATCH_SIZE = 100  # Flush aggregates to DB every N events

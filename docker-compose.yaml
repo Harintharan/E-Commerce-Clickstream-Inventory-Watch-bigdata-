@@ -220,9 +220,6 @@ services:
       "
     restart: on-failure
 
-  # Note: Spark is installed via PySpark pip package in stream-processor
-  # No separate Spark Master/Worker containers needed for this deployment
-
   # Python Kafka Producer Service
   python-producer:
     image: python-producer:latest
